@@ -1,0 +1,1766 @@
+---
+title: "Metastasis Trios"
+author: "Jennifer Karlow (Flynn)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dev = 'pdf',dev.args=list(pdf = list(useDingbats = FALSE)),fig.width=7,fig.height=9,fig.path='/tavern/jflynn/Projects/metastasis/trios/figures')
+```
+
+**Libraries**
+
+```{r load libraries}
+library(ChIPQC)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(gplots)
+library(plyr)
+library(reshape2)
+library(zoo)
+library(Hmisc)
+packageVersion("ChIPQC")
+packageVersion("dplyr")
+packageVersion("ggplot2")
+packageVersion("ggpubr")
+packageVersion("gplots")
+packageVersion("plyr")
+packageVersion("reshape2")
+packageVersion("zoo")
+packageVersion("Hmisc")
+```
+
+**Universal plot parameters**
+
+```{r set plot parameters}
+theme_set(theme_bw() %+replace%  theme(panel.background=element_rect(fill="white"),panel.border=element_rect(color="black",fill=NA),panel.grid=element_blank()))
+```
+
+**Functions**
+
+```{r load functions}
+# Create list of colors for samples
+## Input: number of samples for which there should be colors
+## Output: color hues for each sample
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Linear equation
+## Input: dataframe, dependent and independent variables
+## Output: linear equation
+lm_eqn <- function(df, y, x){
+  m <- lm(y ~ x, df);
+  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2,
+                   list(a = format(coef(m)[1], digits = 2)[[1]],
+                        b = format(coef(m)[2], digits = 2)[[1]],
+                        r2 = format(summary(m)$r.squared, digits = 3)))
+  return(as.character(as.expression(eq)))
+}
+
+# Linear regression significance p-value (adapted from: https://stackoverflow.com/questions/5587676/pull-out-p-values-and-r-squared-from-a-linear-regression)
+## Input: dataframe, dependent and independent variables
+## Output: linear regression p-value
+lm_pval <- function (df, y, x) {
+  m <- lm(y ~ x, df);
+  f <- summary(m)$fstatistic
+  p <- pf(f[1],f[2],f[3],lower.tail=F)
+  attributes(p) <- NULL
+  return(p)
+}
+
+```
+
+**Constants**
+
+```{r load constants}
+# Colors for normal, primary, and metastasis samples
+colors = gg_color_hue(3)
+normal_primary_metastasis_colors=c(colors[2], colors[3], colors[1])
+
+# Density plot adjustment value
+adjust_value=5
+```
+
+**Vectors**
+
+```{r load vectors}
+# List of standard chromosomes
+chromosomes = c("chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10","chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19","chr20","chr21","chr22","chrX","chrY")
+autosomal_chromosomes = c("chr1","chr10","chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19","chr2","chr20","chr21","chr22","chr3","chr4","chr5","chr6","chr7","chr8","chr9")
+
+trios = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+```
+
+**Input Files**
+
+```{r load input files}
+
+## Data
+# MethylCRF output files (autosomal only)
+autosomal_methylCRF_output_files_directory="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/"
+
+# DMRs (MnM output, q-value threshold of 0.00001)
+autosomal_DMRs_directory="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/"
+
+# Sample purity estimates
+sample_purity_estimates="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/sample_purity/sequenza_purity_estimates.txt"
+
+# Clinical data
+clinical_data="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_d/fga_vs_pearson_correlation/clinical_data.txt"
+
+# DMVs (autosomal)
+DMVs="/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_shared_by_all_normals/04202022/autosomal_DMVs_shared_by_all_normals_sorted.bed"
+
+
+## Genome annotations
+# hg19 chromosomes sizes
+hg19_chr_sizes="/bar/genomes/hg19/bwa/hg19_lite.size"
+
+# hg19 1kb bins
+hg19_1kb_bins="/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows.bed"
+
+# Whitelist 1kb bins
+whitelist_1kb_bins="/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows_excluding_blacklist.bed"
+
+# Whitelist autosomal 1kb bins
+whitelist_autosomal_1kb_bins="/bar/jflynn/data/hg19/genomic_bins/hg19_autosomal_1kb_windows_excluding_blacklist.bed"
+
+# Blacklist regions
+blacklist="/bar/jflynn/data/hg19/hg19_blacklisted_regions.bed"
+
+# All CpGs
+all_cpgs="/bar/twlab-shared/genomes/hg19/MRE/CpG_sites.bed"
+
+```
+
+**Public Data**
+
+# Refseq data
+```{r load Refseq files}
+promoters="/bar/jflynn/data/hg19/genomic_features/refseq_promoters_merge.txt"
+```
+
+# Roadmap data
+## Roadmap ChromHMM state calls
+
+```{r load Roadmap files}
+# ChromHMM 18-state files
+epigenomic_annotation_files="/tavern/jflynn/Projects/cancer_enhancer_project/data/chromHMM18_annotation_files/bedfiles/all/*"
+
+# Epigenomic annotation files for normal lung (E096 Roadmap), each file is a different epigenetic state, generated using the script: "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/get_E096_regions_for_each_of_the_18_states.sh"
+epigenomic_annotation_files_normal_lung="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/E096_chromHMM_18_state_locations/*"
+
+```
+
+# ENCODE data
+## ENCODE ChIP-Seq data
+
+```{bash Download processed ENCODE ChIP-Seq data}
+
+```
+
+**Data Processing**
+
+#Original files
+
+#MethylCRF
+
+#MnM
+
+
+
+
+
+
+
+**Data Analyses**
+
+### Figure 1A ###
+## Calculate the average autosomal methylation across different normal lung epigenomic annotations
+```{bash Determine average autosomal methylation across different normal lung epigenomic annotations, eval=FALSE}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/determine_average_autosomal_methylation_across_different_normal_lung_epigenomic_annotations.sh
+
+# Load in the appropriate module(s)
+module load bedtools/2.27.1
+
+# Make the appropriate output directories if they do not already exist
+mkdir -p epigenomic_overlap_files
+mkdir -p epigenomic_summary_files
+
+methylCRF_output_files_autosomal_only="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/methylCRF_output_files_autosomal_only"
+epigenomic_annotation_files_normal_lung="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/E096_chromHMM_18_state_locations/*"
+
+while read file; do
+	sample=$(echo $file | awk -F'/' '{print $NF}' | awk -F'_' '{print $1}')
+	for epi_file in ${epigenomic_annotation_files_normal_lung[*]}
+	do
+		epi_group=$(echo $epi_file | awk -F'/' '{print $NF}' | awk -F'E096_' '{print $2}' | awk -F'_locations.bed' '{print $1}')
+		output_file="./epigenomic_overlap_files/"$sample"_methylCRF_"$epi_group"_overlap.txt"	
+		if ! [ -s $output_file ]; then
+			bedtools intersect -a $file -b $epi_file -u > $output_file
+		fi
+		average_methylation=$(awk '{total += $5} END {print total/NR }' $output_file)
+
+		summary_file="./epigenomic_summary_files/"$sample"_E069_epigenomic_methylation_summary_file.txt"
+		if ! [ -s $summary_file ]; then
+			echo -e $sample'\t'$epi_group'\t'$average_methylation > $summary_file
+		else
+			echo -e $sample'\t'$epi_group'\t'$average_methylation >> $summary_file
+		fi
+	done
+done < $methylCRF_output_files_autosomal_only
+```
+
+## Plot average methylation across each lung epigenomic state, seperating samples according to disease status
+```{r plot average methylation over lung epi-annotations}
+
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/plot_heatmap_of_average_methylation_across_each_epi_state_for_E096_for_each_sample.r
+
+# Read in the autosomal methyaltion data for each sample
+files <- list.files(path="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/epigenomic_summary_files", full.names=TRUE, recursive=FALSE)
+for (file in files)
+{
+  sample=strsplit(basename(file), "_")[[1]][1]
+  output_title=paste0(sample, "_epi_annotations")
+  t <- read.table(file, header=FALSE) # load file
+  colnames(t)=c("sample", "epigenetic_state", "average_methylation")
+  assign(output_title, t)
+}
+
+all_data=rbind(N0_epi_annotations, N1_epi_annotations, N2_epi_annotations, N3_epi_annotations, N4_epi_annotations, N5_epi_annotations, N6_epi_annotations,
+               N7_epi_annotations, N8_epi_annotations, N9_epi_annotations, N10_epi_annotations, N11_epi_annotations, P0_epi_annotations, P1_epi_annotations,
+               P2_epi_annotations, P3_epi_annotations, P4_epi_annotations, P5_epi_annotations, P6_epi_annotations, P7_epi_annotations, P8_epi_annotations,
+               P9_epi_annotations, P10_epi_annotations, P11_epi_annotations, B0_epi_annotations, B1_epi_annotations, B2_epi_annotations, B3_epi_annotations,
+               B4_epi_annotations, B5_epi_annotations, B6_epi_annotations, B7_epi_annotations, B8_epi_annotations, B9_epi_annotations, B10_epi_annotations,
+               B11_epi_annotations)
+all_data$Sample_Type=as.factor(c(rep("Normal", 216), rep("Primary", 216), rep("Metastasis", 216)))
+all_data$Sample_Type = factor(all_data$Sample_Type,levels(all_data$Sample_Type)[c(2, 3, 1)])
+all_data$f1f2 <- interaction(all_data$Sample_Type, all_data$epigenetic_state)
+
+# Get order of epi-states (based on median methylation value in normal samples)
+x=as.data.frame(group_by(all_data[all_data$Sample_Type=="Normal",], epigenetic_state) %>% summarize(m = median(average_methylation)))
+epi_state_order=as.character(x[order(x$m),]$epigenetic_state)
+epi_state_order=paste0(c("Normal.", "Primary.", "Metastasis."), rep(epi_state_order, each=3))
+
+# Plot data
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/Figure1A.pdf", width = 20, height=10)
+ggboxplot(all_data, x= "f1f2", y = "average_methylation",
+              color = "Sample_Type", palette=normal_primary_metastasis_colors, add = "jitter", order=epi_state_order)+ theme(axis.title.y = element_text(size=10), axis.text.y = element_text(size=10), axis.text.x = element_text(size=10, angle=90), axis.ticks.x = element_blank(), axis.title.x = element_text(size=0)) + scale_y_continuous(name = "Percentage Methylation") + theme(plot.title = element_text(hjust = 0.5), legend.position="non") + ggtitle("Average Autosomal Methylation Across\nLung Epigenic Features") + theme(axis.title.y = element_text(size=10), axis.text.y = element_text(size=10), axis.text.x = element_text(size=10, angle=90), axis.ticks.x = element_blank(), axis.title.x = element_text(size=0)) + scale_x_discrete(labels=c("Normal.1_TssA" = "", "Primary.1_TssA" = "1 TssA", "Metastasis.1_TssA" = "", "Normal.10_EnhA2" = "", "Primary.10_EnhA2" = "10 EnhA2", "Metastasis.10_EnhA2" = "", "Normal.11_EnhWk" = "", "Primary.11_EnhWk" = "11 EnhWk", "Metastasis.11_EnhWk" = "", "Normal.12_ZNF_Rpts" = "", "Primary.12_ZNF_Rpts" = "12 ZNF_Rpts", "Metastasis.12_ZNF_Rpts" = "", "Normal.13_Het" = "", "Primary.13_Het" = "13 Het", "Metastasis.13_Het" = "", "Normal.14_TssBiv" = "", "Primary.14_TssBiv" = "14 TssBiv", "Metastasis.14_TssBiv" = "", "Normal.15_EnhBiv" = "", "Primary.15_EnhBiv" = "15 EnhBiv", "Metastasis.15_EnhBiv" = "", "Normal.16_ReprPC" = "", "Primary.16_ReprPC" = "16 ReprPC", "Metastasis.16_ReprPC" = "", "Normal.17_ReprPCWk" = "", "Primary.17_ReprPCWk" = "17 ReprPCWk", "Metastasis.17_ReprPCWk" = "", "Normal.18_Quies" = "", "Primary.18_Quies" = "18 Quies", "Metastasis.18_Quies" = "", "Normal.2_TssFlnk" = "", "Primary.2_TssFlnk" = "2 TssFlnk", "Metastasis.2_TssFlnk" = "", "Normal.3_TssFlnkU"="", "Primary.3_TssFlnkU"="3 TssFlnkU", "Metastasis.3_TssFlnkU"="", "Normal.4_TssFlnkD"="", "Primary.4_TssFlnkD"="4 TssFlnkD", "Metastasis.4_TssFlnkD"="", "Normal.5_Tx"="", "Primary.5_Tx"="5 Tx", "Metastasis.5_Tx"="", "Normal.6_TxWk"="", "Primary.6_TxWk"="6 TxWk", "Metastasis.6_TxWk"="", "Normal.7_EnhG1"="", "Primary.7_EnhG1"="7 EnhG1", "Metastasis.7_EnhG1"="", "Normal.8_EnhG2"="", "Primary.8_EnhG2"="8 EnhG2", "Metastasis.8_EnhG2"="", "Normal.9_EnhA1"="", "Primary.9_EnhA1"="9 EnhA1", "Metastasis.9_EnhA1"=""))
+dev.off()
+
+# Caluclate significant differences in methylation (BH-corrected)
+adj_pvals=compare_means(average_methylation~f1f2, all_data, group.by="epigenetic_state", method = "t.test", paired = TRUE, p.adjust.method = "hochberg")
+```
+
+### Figure S1A ###
+## Determine the average global autosomal methylation across samples
+``` {bash Determine the average global autosomal methylation across samples, eval=FALSE}
+# Adapted from the script: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/determine_average_global_autosomal_methylation.sh
+
+output_file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_methylation_over_samples.txt"
+files= "/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/*.bed"
+for file in ${files[*]}
+do
+	# Get sample name
+	sample=$(echo $file | awk -F'/' '{print $NF }' | awk -F'_' '{print $1}')
+	sample_type=${sample:0:1}
+	sample_number=${sample:1:2}
+	average=$(awk '{ sum += $5 } END { if (NR > 0) print sum / NR }' $file)
+	
+	if [ ! -f $output_file ]; then
+		echo -e $sample_number"\t"$sample_type"\t"$average"\t"$sample > $output_file
+	else
+		echo -e $sample_number"\t"$sample_type"\t"$average"\t"$sample >> $output_file
+	fi
+done 
+
+#Output file: "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_methylation_over_samples.txt"
+```
+
+## Determine the change in average global autosomal methylation across samples (primary to metastasis)
+``` {r Determine the change in avearge global autosomal methylation across samples}
+
+# Read in the average change in global methylation from primary to metastasis (autosomal only)
+average_autosomal_methylation_per_sample=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_methylation_over_samples.txt")
+colnames(average_autosomal_methylation_per_sample)=c("trio", "type", "average_methylation", "sample")
+average_change_in_autosomal_methylation_per_trio=data.frame(trio=c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+                                                            average_change_in_autosomal_methylation_ptob=c(average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B0"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P0"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B1"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P1"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B2"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P2"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B3"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P3"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B4"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P4"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B5"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P5"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B6"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P6"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B7"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P7"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B8"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P8"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B9"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P9"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B10"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P10"],
+                                                                                                           average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="B11"] - average_autosomal_methylation_per_sample$average_methylation[average_autosomal_methylation_per_sample$sample=="P11"]))
+```
+
+## Determine the average change in lung bivalent enhancer methylation from primary to metastasis
+``` {r Determine the average change in lung bivalent enhancer methylation from primary to metastasis}
+# Read in the average change in lung bivalent enhancer methylation from primary to metastasis
+
+files <- list.files(path="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/epigenomic_summary_files", full.names=TRUE, recursive=FALSE)
+for (file in files)
+{
+  sample=strsplit(basename(file), "_")[[1]][1]
+  output_title=paste0(sample, "_epi_annotations")
+  t <- read.table(file, header=FALSE) # load file
+  colnames(t)=c("sample", "epigenetic_state", "average_methylation")
+  assign(output_title, t)
+}
+
+change_in_average_lung_biv_enh_methylation_ptob=data.frame(trio=c(0,1,2,3,4,5,6,7,8,9,10,11),
+                                                           change_in_average_lung_biv_enh_methylation_ptob=c(B0_epi_annotations$average_methylation[B0_epi_annotations$epigenetic_state=="15_EnhBiv"] - P0_epi_annotations$average_methylation[P0_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B1_epi_annotations$average_methylation[B1_epi_annotations$epigenetic_state=="15_EnhBiv"] - P1_epi_annotations$average_methylation[P1_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B2_epi_annotations$average_methylation[B2_epi_annotations$epigenetic_state=="15_EnhBiv"] - P2_epi_annotations$average_methylation[P2_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B3_epi_annotations$average_methylation[B3_epi_annotations$epigenetic_state=="15_EnhBiv"] - P3_epi_annotations$average_methylation[P3_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B4_epi_annotations$average_methylation[B4_epi_annotations$epigenetic_state=="15_EnhBiv"] - P4_epi_annotations$average_methylation[P4_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B5_epi_annotations$average_methylation[B5_epi_annotations$epigenetic_state=="15_EnhBiv"] - P5_epi_annotations$average_methylation[P5_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B6_epi_annotations$average_methylation[B6_epi_annotations$epigenetic_state=="15_EnhBiv"] - P6_epi_annotations$average_methylation[P6_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B7_epi_annotations$average_methylation[B7_epi_annotations$epigenetic_state=="15_EnhBiv"] - P7_epi_annotations$average_methylation[P7_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B8_epi_annotations$average_methylation[B8_epi_annotations$epigenetic_state=="15_EnhBiv"] - P8_epi_annotations$average_methylation[P8_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B9_epi_annotations$average_methylation[B9_epi_annotations$epigenetic_state=="15_EnhBiv"] - P9_epi_annotations$average_methylation[P9_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B10_epi_annotations$average_methylation[B10_epi_annotations$epigenetic_state=="15_EnhBiv"] - P10_epi_annotations$average_methylation[P10_epi_annotations$epigenetic_state=="15_EnhBiv"],
+                                                                                                             B11_epi_annotations$average_methylation[B11_epi_annotations$epigenetic_state=="15_EnhBiv"] - P11_epi_annotations$average_methylation[P11_epi_annotations$epigenetic_state=="15_EnhBiv"]))
+```
+
+## Determine if there is a correlation between global methylation change and lung bivalent enhancer methylation change
+``` {r Determine correlation between change in global methylation and change in lung bivalent enhancer methylation (primary to metastasis)}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_d/autosomal_methylation_only/plot_average_change_in_lung_biv_enhancer_methylation_ptob_vs_average_change_in_autosomal_methylation_ptob.r
+
+data=merge(average_change_in_autosomal_methylation_per_trio, change_in_average_lung_biv_enh_methylation_ptob, by="trio")
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/FigureS1A.pdf")
+ggplot(data, aes(x=average_change_in_autosomal_methylation_ptob, y=change_in_average_lung_biv_enh_methylation_ptob)) + geom_point() + 
+  xlab("Average change in autosomal methylation primary to metastasis") + ylab("Average change in lung bivalent enhancer methylation primary to metastasis") + geom_smooth(method=lm, se = F) + 
+  geom_text(aes(x=-Inf,y=-Inf,hjust=0,vjust=0,label = lm_eqn(data, change_in_average_lung_biv_enh_methylation_ptob, average_change_in_autosomal_methylation_ptob)), parse = TRUE, check_overlap = TRUE) +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_text(aes(label=trio),hjust=0, vjust=0)
+dev.off()
+
+pval=lm_pval(data, data$average_change_in_lung_biv_methylation_ptob, data$average_change_in_autosomal_methylation_ptob)
+```
+
+### Figure S1B ###
+## Determine the average change in purity per sample 
+```{r Determine the average change in purity per sample}
+# Read in the purity esitmates per sample
+sample_characteristics=read.table(sample_purity_estimates, header=T, sep="\t")
+methylation_sample_characteristics=sample_characteristics[!is.na(sample_characteristics$Methylation.ID),]
+change_in_purity_PtoB=data.frame(trio=c(0,1,2,3,4,5,6,7,8,9),
+                                 change_in_purity_PtoB=c(methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B0"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P0"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B1"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P1"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B2"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P2"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B3"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P3"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B4"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P4"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B5"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P5"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B6"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P6"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B7"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P7"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B8"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P8"],
+                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="B9"] - methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P9"]))
+```
+
+## Determine if there is a correlation between change in purity and change in lung bivalent enhancer methylation
+``` {r Determine correlation between change in purity and change in lung bivalent enhancer methylation (primary to metastasis)}
+
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/sample_purity/plot_change_in_average_lung_biv_enh_methylation_PtoB_vs_change_in_purity_PtoB.r
+
+# Create a dataframe:
+data=merge(change_in_purity_PtoB, change_in_average_lung_biv_enh_methylation_ptob, by="trio")
+
+# Plot the data
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/FigureS1B.pdf")
+ggplot(data, aes(x=change_in_purity_PtoB, y=change_in_average_lung_biv_enh_methylation_ptob)) + geom_point() + 
+  xlab("Change in Purity Estimate from Primary to Metastasis") + ylab("Change in average lung bivalent enhancer methylation primary to metastasis") + geom_smooth(method=lm, se = F, color="black") + 
+  geom_text(aes(x=-Inf,y=-Inf,hjust=0,vjust=0,label = lm_eqn(data, change_in_purity_PtoB, change_in_average_lung_biv_enh_methylation_ptob)), parse = TRUE, check_overlap = TRUE) +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_text(aes(label=trio),hjust=0, vjust=0) + geom_vline(xintercept=0, linetype="dotted") + geom_hline(yintercept=0, linetype="dotted")
+dev.off()
+
+pval=lm_pval(data, data$change_in_purity_PtoB, data$change_in_average_lung_biv_enh_methylation_ptob)
+
+```
+
+### Figure S1C
+## Generate autosomal global methylation density plots for each sample, plotting by patient and coloring by disease type (Figure S1C, left)
+```{r Generage autosomal global methylation density plots}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_a/generate_global_methylCRF_density_plots_and_cdf_plots.r
+
+for (trio in trios)
+{
+  # Read in the data
+  normal_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/N", trio, "_autosomal_mcrf.bed"), header=FALSE))
+  primary_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/P", trio, "_autosomal_mcrf.bed"), header=FALSE))
+  metastasis_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/B", trio, "_autosomal_mcrf.bed"), header=FALSE))
+  
+  normal_methylation_percentages_df$Class="Normal"
+  primary_methylation_percentages_df$Class="Primary"
+  metastasis_methylation_percentages_df$Class="Metastasis"
+  
+  normal_methylation_percentages_df$Sample=paste0("N", trio)
+  primary_methylation_percentages_df$Sample=paste0("P", trio)
+  metastasis_methylation_percentages_df$Sample=paste0("B", trio)
+  
+  # Create the combined data frame for given patient
+  combined_dataframe = rbind(normal_methylation_percentages_df, primary_methylation_percentages_df, metastasis_methylation_percentages_df)
+  combined_dataframe$V5 = combined_dataframe$V5*100
+  combined_dataframe$Class <- factor(combined_dataframe$Class, levels = c("Metastasis", "Normal", "Primary"))
+  
+  # Generage methylation density plot
+  outputfilename <- paste("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/FigureS1C_trio", trio, "_all_cpgs.pdf",sep="")
+  title_name <- paste("MethylCRF Methylation Density Plots for Lung Metastasis Trio ", trio, "\n Using an adjust value of ", adjust_value, sep="")
+  pdf(outputfilename)
+  p=ggplot(combined_dataframe, aes(x=V5)) + geom_density(aes(group=Sample, colour=Class), alpha=0.3, adjust = adjust_value) + xlab("Percentage Methylation") + ylab("Density") + ggtitle(title_name) + theme(plot.title = element_text(size = 10, hjust = 0.5)) + theme(plot.title = element_text(size = 10)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"))
+  print(p)
+  dev.off()
+}
+```
+
+## Generate autosomal promoter methylation density plots (Figure S1C, right)
+```{bash Create a file that lists the average methylation value for each autosomal promoter CpG for normal, primary, and metastasis samples, eval=FALSE}
+# Adapted from /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/script_to_generate_autosomal_methylation_density_plot_global.sh
+
+# Load in the appropriate module(s)
+module load bedtools/2.27.1
+
+# Link to promoter locations file
+promoters="/bar/jflynn/data/hg19/genomic_features/refseq_promoters_merge.txt"
+methylCRF_files="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_methylCRF_files"
+
+while read file; do
+	sample=$(echo $file | awk -F'/' '{print $NF}' | awk -F'_' '{print $1}')
+	
+	# Extracting only methylation values at CpGs that overlap with refseq promoters	
+	promoters_only_outputfile="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/"$sample"_mcrf_promoters.bed"
+	if ! [ -s $promoters_only_outputfile ]; then
+		bedtools intersect -a $file -b $promoters -u > $promoters_only_outputfile
+	fi
+done <$methylCRF_files
+
+normal_promoter_mcrf_files="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/N*"
+primary_promoter_mcrf_files="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/P*"
+metastasis_promoter_mcrf_files="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/B*"
+
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "N", a[i]/b[i];}' ${normal_promoter_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/normal_methylation_averages_autosomal_promoter_all_files_11122017"
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "P", a[i]/b[i];}' ${primary_promoter_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/primary_methylation_averages_autosomal_promoter_all_files_11122017"
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "B", a[i]/b[i];}' ${metastasis_promoter_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/metastasis_methylation_averages_autosomal_promoter_all_files_11122017"
+
+# Create a single output file
+cat $normal_output_file $primary_output_file $metastasis_output_file > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_autosomal_promoter_all_files_11122017"
+
+# Output file: "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_autosomal_promoter_all_files_11122017"
+```
+
+```{r Generage autosomal promoter methylation density plots}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_a/generate_promoter_methylCRF_density_plots_and_cdf_plots.r
+
+for (trio in trios)
+{
+  print(trio) #debug
+  # Read in the data
+  normal_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/N", trio, "_mcrf_promoters.bed"), header=FALSE))
+  primary_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/P", trio, "_mcrf_promoters.bed"), header=FALSE))
+  metastasis_methylation_percentages_df <- as.data.frame(read.table(file=paste0("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/B", trio, "_mcrf_promoters.bed"), header=FALSE))
+  
+  normal_methylation_percentages_df$Class="Normal"
+  primary_methylation_percentages_df$Class="Primary"
+  metastasis_methylation_percentages_df$Class="Metastasis"
+  
+  normal_methylation_percentages_df$Sample=paste0("N", trio)
+  primary_methylation_percentages_df$Sample=paste0("P", trio)
+  metastasis_methylation_percentages_df$Sample=paste0("B", trio)
+  print("got here 1") #debug
+  
+  # Create the combined data frame for a given patient
+  combined_dataframe = rbind(normal_methylation_percentages_df, primary_methylation_percentages_df, metastasis_methylation_percentages_df)
+  combined_dataframe$V5 = combined_dataframe$V5*100
+  combined_dataframe$Class <- factor(combined_dataframe$Class, levels = c("Metastasis", "Normal", "Primary"))
+  
+  print("got here 2") #debug
+  
+  # Generate Methylation Density Plots
+  outputfilename <- paste("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/FigureS1C_trio", trio, "_promoter.pdf",sep="")
+  title_name <- paste("MethylCRF Promoter CpG Methylation Density Plots for Lung Metastasis Trio ", trio, "\n Using an adjust value of ", adjust_value, sep="")
+  pdf(outputfilename)
+  p=ggplot(combined_dataframe, aes(x=V5)) + geom_density(aes(group=Sample, colour=Class), alpha=0.3, adjust = adjust_value) + xlab("Percentage Methylation") +
+ylab("Density") + ggtitle(title_name) + theme(plot.title = element_text(size = 10, hjust = 0.5)) + theme(plot.title = element_text(size = 10)) + theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"))
+  print(p)
+  dev.off()
+  
+  print("got here 3") #debug
+}
+
+```
+
+### Figure 1B ###
+## Generate global autosomal methylation density plot, coloring by disease type (Figure 1B, left)
+```{bash Create a file that lists the average methylation value for each autosomal CpG for normal, primary, and metastasis samples, eval=FALSE}
+# Adapted from /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/script_to_generate_autosomal_methylation_density_plot_global.sh
+
+# Create a file that lists the average methylation value for each CpG for normal, primary, and metastasis samples
+normal_all_sites_mcrf_files="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/N*"
+primary_all_sites_mcrf_files="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/P*"
+metastasis_all_sites_mcrf_files="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/B*"
+
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "N", a[i]/b[i];}' ${normal_all_sites_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/normal_methylation_averages_all_autosomal_sites_all_files_11122017"
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "P", a[i]/b[i];}' ${primary_all_sites_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/primary_methylation_averages_all_autosomal_sites_all_files_11122017"
+awk '{a[FNR]+=$5;b[FNR]++;}END{for(i=1;i<=FNR;i++)print "B", a[i]/b[i];}' ${metastasis_all_sites_mcrf_files[@]} > "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/metastasis_methylation_averages_all_autosomal_sites_all_files_11122017"
+
+# Create a single output file
+combined_output_file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_all_autosomal_sites_all_files_11122017"
+cat $normal_output_file $primary_output_file $metastasis_output_file > $combined_output_file
+
+# Output file: "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_all_autosomal_sites_all_files_11122017
+```
+
+```{r Generate autosomal global methylation density plot (average CpG methylation values for each disease state)}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/script_to_generate_autosomal_methylation_density_plot_global.r
+
+# Read in the methylation percentages file and modfy column headers
+methylation_percentages <- read.table(file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_all_autosomal_sites_all_files_11122017", header=FALSE, sep=" ")
+methylation_percentages_df <- data.frame(methylation_percentages)
+colnames(methylation_percentages_df) <- c("Class", "Percentage_Methylation")
+methylation_percentages_df$Percentage_Methylation = methylation_percentages_df$Percentage_Methylation*100
+
+# Generate Methylation Density Plots
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/Figure1B_left.pdf")
+ggplot(methylation_percentages_df, aes(x=Percentage_Methylation)) + 
+  geom_density(aes(colour=Class), adjust = 5) + 
+  xlab("Percentage Methylation") + ylab("Density") + 
+  theme(plot.title = element_text(size = 10)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ 
+  theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"))
+dev.off()
+```
+
+## Generate autosomal promoter methylation density plot (Figure 1B, right)
+```{r Generate autosomal promoter methylation density plot (average CpG methylation values for each disease state)}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/script_to_generate_autosomal_methylation_density_plot_promoter.r
+
+# Read in the methylation percentages file and modfy column headers
+methylation_percentages <- read.table(file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/all_methylation_averages_autosomal_promoter_all_files_11122017", header=FALSE, sep=" ")
+methylation_percentages_df <- data.frame(methylation_percentages)
+colnames(methylation_percentages_df) <- c("Class", "Percentage_Methylation")
+methylation_percentages_df$Percentage_Methylation = methylation_percentages_df$Percentage_Methylation*100
+
+# Generate Methylation Density Plots
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/Figure1B_right.pdf")
+ggplot(methylation_percentages_df, aes(x=Percentage_Methylation)) + geom_density(aes(colour=Class), adjust = 5) + xlab("Percentage Methylation") + ylab("Density") + theme(plot.title = element_text(size = 10)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))+ theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"))
+dev.off()
+```
+
+### Figure S1D ###
+## Plot average autosomal methlyation for each patient, across each disease state (Figure S1D, left)
+```{r Plot average autosomal methlyation for each patient, across each disease state}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/create_barplots.r
+
+# Read in the data
+data=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_methylation_over_samples.txt", header=FALSE, sep="\t")
+data$V2 <- factor(data$V2, levels = c("N", "P", "B")) #can specify ordering
+colors = gg_color_hue(3)
+color_order=c(colors[2], colors[3], colors[1])
+
+# Plot the figure
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/Figure_S1D_left.pdf")
+ggplot() + geom_bar(aes(y = V3, x = V1, fill = V2), data = data,stat="identity", position="dodge") + ylab("Average Autosomal Methylation") + ggtitle("Average Global Autosomal Methylation for All Samples") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(name="Tissue Status", breaks=c("N", "P", "B"), labels=c("Normal", "Primary", "Metastasis"), values=color_order)+
+  scale_x_continuous("Patient Number", labels = as.character(data$V1), breaks = data$V1)+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+dev.off()
+```
+
+## Determine the average promoter autosomal methylation across samples
+```{bash Determine the average autosomal promoter methylation across samples, eval=FALSE} 
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/determine_average_promoter_autosomal_methylation.sh
+
+output_file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_autosomal_promoter_methylation_over_samples.txt"
+files="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal/autosomal_promoter_temp_data/*.bed"
+for file in ${files[*]}
+do
+	# Get sample name
+	sample=$(echo $file | awk -F'/' '{print $NF }' | awk -F'_' '{print $1}')
+	sample_type=${sample:0:1}
+	sample_number=${sample:1:2}
+	average=$(awk '{ sum += $5 } END { if (NR > 0) print sum / NR }' $file)
+	
+	if [ ! -f $output_file ]; then
+		echo -e $sample_number"\t"$sample_type"\t"$average"\t"$sample > $output_file
+	else
+		echo -e $sample_number"\t"$sample_type"\t"$average"\t"$sample >> $output_file
+	fi
+done
+
+#Output file: "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_autosomal_promoter_methylation_over_samples.txt"
+```
+
+## Plot average autosomal promoter methlyation for each patient, across each disease state
+```{r Plot average autosomal methlyation for each patient, across each disease state}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/create_barplots_promoter.r
+
+# Read in the data
+data=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_c/average_autosomal_promoter_methylation_over_samples.txt", header=FALSE, sep="\t")
+data$V2 <- factor(data$V2, levels = c("N", "P", "B")) #can specify ordering
+colors = gg_color_hue(3)
+color_order=c(colors[2], colors[3], colors[1])
+
+# Plot the figure
+pdf("/tavern/jflynn/Projects/metastasis/trios/manuscript_figures/Figure_S1D_right.pdf")
+ggplot() + geom_bar(aes(y = V3, x = V1, fill = V2), data = data,stat="identity", position="dodge") + ylab("Average Autosomal Methylation") + ggtitle("Average Autosomal Promoter Methylation for All Samples") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(name="Tissue Status", breaks=c("N", "P", "B"), labels=c("Normal", "Primary", "Metastasis"), values=color_order)+
+  scale_x_continuous("Patient Number", labels = as.character(data$V1), breaks = data$V1)+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+dev.off()
+```
+
+### Figure S1E ###
+## Calculate and Plot CDFs using all autosomal CpGs (Figure S1E, left)
+```{r Calculate and Plot CDFs}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_b/plot_cdf_of_average_autosomal_methylation_and_calculate_significance.r
+
+# This script reads in the average autosomal methylation density plot data for the different disease states and plots a cumulative distribution density plot and calculates KS statistics to see whether the distributions are statistically different.
+
+# Read in the methylation percentages file and modfy column headers
+methylation_percentages <- read.table(file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/all_methylation_averages_all_autosomal_sites_all_files_11122017", header=FALSE, sep=" ")
+methylation_percentages_df <- data.frame(methylation_percentages)
+colnames(methylation_percentages_df) <- c("Class", "Percentage_Methylation")
+methylation_percentages_df$Percentage_Methylation = methylation_percentages_df$Percentage_Methylation*100
+
+# Generage Methylation Cumulative Distribution Plots
+n=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="N"]
+p=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="P"]
+b=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="B"]
+title_name="Empirical Cumulative Distribution Functions\nfor Average Methyaltion Values Over\nAll Autosomal CpG Sites"
+outputfilename <- "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_b/plots/cumulative_distribution_of_average_methylCRF_methylation_values_at_all_autosomal_cpgs.pdf"
+pdf(outputfilename)
+plot(ecdf(n), xlim = range(c(n, p)), col="green", main=title_name, ylab="Emperical Cumulative Distribution Function", xlab="Methylation Percentage")
+plot(ecdf(p), add = TRUE, col="blue")
+plot(ecdf(b), add = TRUE, col="red")
+dev.off()
+
+# Calculate the KS tests to see if the distributions are statistically different
+n_vs_p_ks_test=ks.test(n, p)
+n_vs_b_ks_test=ks.test(n, b)
+p_vs_b_ks_test=ks.test(p, b)
+```
+
+## Calculate and Plot CDFs using only autosomal promoter CpGs (Figure S1E, right)
+```{r Calculate and Plot CDFs}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_b/plot_cdf_of_average_promoter_autosomal_methylation_and_calculate_significance.r
+
+# This script reads in the average autosomal promoter methylation density plot data for the different disease states and plots a cumulative distribution density plot and calculates KS statistics to see whether the distributions are statistically different.
+
+# Read in the methylation percentages file and modfy column headers
+methylation_percentages <- read.table(file="/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/all_methylation_averages_autosomal_promoter_all_files_11122017", header=FALSE, sep=" ")
+methylation_percentages_df <- data.frame(methylation_percentages)
+colnames(methylation_percentages_df) <- c("Class", "Percentage_Methylation")
+methylation_percentages_df$Percentage_Methylation = methylation_percentages_df$Percentage_Methylation*100
+
+# Generage Methylation Cumulative Distribution Plots
+n=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="N"]
+p=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="P"]
+b=methylation_percentages_df$Percentage_Methylation[methylation_percentages_df$Class=="B"]
+title_name="Empirical Cumulative Distribution Functions\nfor Average Methyaltion Values Over\nAutosomal Promoter CpG Sites"
+outputfilename <- "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_b/plots/cumulative_distribution_of_average_methylCRF_methylation_values_at_autosomal_promoter_cpgs.pdf"
+pdf(outputfilename)
+plot(ecdf(n), xlim = range(c(n, p)), col="green", main=title_name, ylab="Emperical Cumulative Distribution Function", xlab="Methylation Percentage")
+plot(ecdf(p), add = TRUE, col="blue")
+plot(ecdf(b), add = TRUE, col="red")
+dev.off()
+
+# Calculate the KS tests to see if the distributions are statistically different
+n_vs_p_ks_test_promoter=ks.test(n, p)
+n_vs_b_ks_test_promoter=ks.test(n, b)
+p_vs_b_ks_test_promoter=ks.test(p, b)
+```
+
+### Figure 1C ###
+## Calculate and plot Pearson correlations for each pairwise combination of samples, using all autosomal CpGs as input
+```{r Calculate and plot Pearson correlations for each pairwise combination of samples, using all autosomal CpGs as input}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/methylcrf_pearson_correlations_all_autosomal_cpgs.r
+rm(dataset)
+
+# Format the data for correlation analysis
+# Get the list of files for correlation analysis
+file_list <- list.files(path = "/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes", pattern="_autosomal_mcrf.bed", full.names = TRUE)
+
+for (file in file_list){
+  
+  current_sample_name=strsplit(file, "/")[[1]]
+  current_sample_name=tail(current_sample_name, n=1)
+  current_sample_name=strsplit(current_sample_name, "_")[[1]][1]
+
+  # if the merged dataset doesn't exist, create it
+  if (!exists("dataset")) {
+    dataset <- read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(dataset))
+    dataset <- cbind(dataset, sample_name)
+  }
+  
+  # if the merged dataset does exist, append to it
+  else {
+    temp_dataset <-read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(temp_dataset))
+    temp_dataset <- cbind(temp_dataset, sample_name)
+    dataset<-rbind(dataset, temp_dataset)
+    rm(temp_dataset)
+  }
+}
+
+colnames(dataset) <- c("chr", "start", "stop", "site", "methylation_value", "sample")
+dataset2=subset(dataset, select = c(site,methylation_value,sample))
+
+# dcast (unmelt) the data
+dcast_data=dcast(data = dataset2,formula = sample~site,fun.aggregate = sum,value.var = "methylation_value")
+data<-dcast_data[,2:ncol(dcast_data)]
+labels<-dcast_data[,1]
+groups<-rep("na",length(labels))
+groups[labels=="B0"|labels=="B1"|labels=="B2"|labels=="B3"|labels=="B4"|labels=="B5"|labels=="B6"|labels=="B7"|labels=="B8"|labels=="B9"|labels=="B10"|labels=="B11"]="Metastasis"
+groups[labels=="N0"|labels=="N1"|labels=="N2"|labels=="N3"|labels=="N4"|labels=="N5"|labels=="N6"|labels=="N7"|labels=="N8"|labels=="N9"|labels=="N10"|labels=="N11"]="Normal"
+groups[labels=="P0"|labels=="P1"|labels=="P2"|labels=="P3"|labels=="P4"|labels=="P5"|labels=="P6"|labels=="P7"|labels=="P8"|labels=="P9"|labels=="P10"|labels=="P11"]="Primary"
+
+dcast_data_t=t(data)
+colnames(dcast_data_t)=labels
+#write.table(dcast_data_t, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/dcast_data_t.txt", col.names = TRUE, row.names = TRUE, quote = FALSE, sep="\t")
+
+# Perform Pearson Correlations on each pairwise combination of columns
+corr_mat=rcorr(dcast_data_t, type="pearson")
+#write.table(corr_mat$r, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/trio_pearson_correlations_all_autosomal_cpgs.txt", col.names = TRUE, row.names = TRUE, quote = FALSE, sep="\t")
+
+# Create figures
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/plots/trio_pearson_correlations_all_autosomal_cpgs_heatmap.pdf")
+col<- colorRampPalette(c("blue", "white", "red"))(20)
+heatmap.2(x = corr_mat$r, col = col, symm = TRUE, key=TRUE, trace="none", tracecol = FALSE)
+dev.off()
+```
+
+### Figure S1F ###
+## Plot differences in Pearson correlations across groups
+```{r Plot differences in Pearson correlations across groups}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/plot_differences_in_correlations_across_groups.r
+
+# This script reads in the pearson correlations between each pairwise comparison (global, autosomal) and plots the distribution of distances for within patient vs between patient
+
+# Read in the correlations
+correlations=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/trio_pearson_correlations_all_autosomal_cpgs.txt", header=T)
+correlations=as.matrix(correlations)
+melted_correlations=melt(correlations)
+melted_correlations=as.data.frame(melted_correlations)
+melted_correlations$comparison=paste(melted_correlations$X1, melted_correlations$X2, sep="_")
+
+# Across patient N to N
+across_patient_nton_comparisons=c("N0_N1", "N0_N2", "N0_N3", "N0_N4", "N0_N5", "N0_N6", "N0_N7",
+                                  "N0_N8", "N0_N9", "N0_N10", "N0_N11", "N1_N2", "N1_N3", 
+                                  "N1_N4", "N1_N5", "N1_N6", "N1_N7", "N1_N8", "N1_N9", "N1_N10", "N1_N11",
+                                  "N2_N3", "N2_N4", "N2_N5", "N2_N6", "N2_N7", "N2_N8", "N2_N9", "N2_N10", "N2_N11",
+                                  "N3_N4", "N3_N5", "N3_N6", "N3_N7", "N3_N8", "N3_N9", "N3_N10", "N3_N11",
+                                  "N4_N5", "N4_N6", "N4_N7", "N4_N8", "N4_N9", "N4_N10", "N4_N11",
+                                  "N5_N6", "N5_N7", "N5_N8", "N5_N9", "N5_N10", "N5_N11",
+                                  "N6_N7", "N6_N8", "N6_N9", "N6_N10", "N6_N11",
+                                  "N7_N8", "N7_N9", "N7_N10", "N7_N11",
+                                  "N8_N9", "N8_N10", "N8_N11",
+                                  "N9_N10", "N9_N11",
+                                  "N10_N11")
+across_patient_nton_comparisons=melted_correlations[melted_correlations$comparison %in% across_patient_nton_comparisons, ]
+across_patient_nton_comparisons$Type="Across_Patient_Normal_to_Normal"
+
+# Within patient N to P
+within_patient_ntop_comparisons=c("N0_P0", "N1_P1", "N2_P2", "N3_P3", "N4_P4", "N5_P5", "N6_P6", "N7_P7",
+                                  "N8_P8", "N9_P9", "N10_P10", "N11_P11")
+within_patient_ntop_comparisons=melted_correlations[melted_correlations$comparison %in% within_patient_ntop_comparisons, ]
+within_patient_ntop_comparisons$Type="Within_Patient_Normal_to_Primary"
+
+# Within patient P to B
+within_patient_ptob_comparisons=c("B0_P0", "B1_P1", "B2_P2", "B3_P3", "B4_P4", "B5_P5", "B6_P6", "B7_P7",
+                             "B8_P8", "B9_P9", "B10_P10", "B11_P11")
+within_patient_ptob_comparisons=melted_correlations[melted_correlations$comparison %in% within_patient_ptob_comparisons, ]
+within_patient_ptob_comparisons$Type="Within_Patient_Primary_to_Metastasis"
+
+# Across patient N to P
+across_patient_ntop_comparisons=c("N0_P1", "N0_P2", "N0_P3", "N0_P4", "N0_P5", "N0_P6", "N0_P7", "N0_P8", "N0_P9", "N0_P10", "N0_P11", 
+                                  "N1_P0", "N1_P2", "N1_P3", "N1_P4", "N1_P5", "N1_P6", "N1_P7", "N1_P8", "N1_P9", "N1_P10", "N1_P11", 
+                                  "N2_P0", "N2_P1", "N2_P3", "N2_P4", "N2_P5", "N2_P6", "N2_P7", "N2_P8", "N2_P9", "N2_P10", "N2_P11", 
+                                  "N3_P0", "N3_P1", "N3_P2", "N3_P4", "N3_P5", "N3_P6", "N3_P7", "N3_P8", "N3_P9", "N3_P10", "N3_P11", 
+                                  "N4_P0", "N4_P1", "N4_P2", "N4_P3", "N4_P5", "N4_P6", "N4_P7", "N4_P8", "N4_P9", "N4_P10", "N4_P11", 
+                                  "N5_P0", "N5_P1", "N5_P2", "N5_P3", "N5_P4", "N5_P6", "N5_P7", "N5_P8", "N5_P9", "N5_P10", "N5_P11", 
+                                  "N6_P0", "N6_P1", "N6_P2", "N6_P3", "N6_P4", "N6_P5", "N6_P7", "N6_P8", "N6_P9", "N6_P10", "N6_P11", 
+                                  "N7_P0", "N7_P1", "N7_P2", "N7_P3", "N7_P4", "N7_P5", "N7_P6", "N7_P8", "N7_P9", "N7_P10", "N7_P11", 
+                                  "N8_P0", "N8_P1", "N8_P2", "N8_P3", "N8_P4", "N8_P5", "N8_P6", "N8_P7", "N8_P9", "N8_P10", "N8_P11", 
+                                  "N9_P0", "N9_P1", "N9_P2", "N9_P3", "N9_P4", "N9_P5", "N9_P6", "N9_P7", "N9_P8", "N9_P10", "N9_P11", 
+                                  "N10_P0", "N10_P1", "N10_P2", "N10_P3", "N10_P4", "N10_P5", "N10_P6", "N10_P7", "N10_P8", "N10_P9", "N10_P11", 
+                                  "N11_P0", "N11_P1", "N11_P2", "N11_P3", "N11_P4", "N11_P5", "N11_P6", "N11_P7", "N11_P8", "N11_P9", "N11_P10")
+
+across_patient_ntop_comparisons=melted_correlations[melted_correlations$comparison %in% across_patient_ntop_comparisons, ]
+across_patient_ntop_comparisons$Type="Across_Patient_Normal_to_Primary"
+
+# Across patient P to B
+across_patient_ptob_comparisons=c("B0_P1", "B0_P2", "B0_P3", "B0_P4", "B0_P5", "B0_P6", "B0_P7", "B0_P8", "B0_P9", "B0_P10", "B0_P11", 
+                                  "B1_P0", "B1_P2", "B1_P3", "B1_P4", "B1_P5", "B1_P6", "B1_P7", "B1_P8", "B1_P9", "B1_P10", "B1_P11", 
+                                  "B2_P0", "B2_P1", "B2_P3", "B2_P4", "B2_P5", "B2_P6", "B2_P7", "B2_P8", "B2_P9", "B2_P10", "B2_P11", 
+                                  "B3_P0", "B3_P1", "B3_P2", "B3_P4", "B3_P5", "B3_P6", "B3_P7", "B3_P8", "B3_P9", "B3_P10", "B3_P11", 
+                                  "B4_P0", "B4_P1", "B4_P2", "B4_P3", "B4_P5", "B4_P6", "B4_P7", "B4_P8", "B4_P9", "B4_P10", "B4_P11", 
+                                  "B5_P0", "B5_P1", "B5_P2", "B5_P3", "B5_P4", "B5_P6", "B5_P7", "B5_P8", "B5_P9", "B5_P10", "B5_P11", 
+                                  "B6_P0", "B6_P1", "B6_P2", "B6_P3", "B6_P4", "B6_P5", "B6_P7", "B6_P8", "B6_P9", "B6_P10", "B6_P11", 
+                                  "B7_P0", "B7_P1", "B7_P2", "B7_P3", "B7_P4", "B7_P5", "B7_P6", "B7_P8", "B7_P9", "B7_P10", "B7_P11", 
+                                  "B8_P0", "B8_P1", "B8_P2", "B8_P3", "B8_P4", "B8_P5", "B8_P6", "B8_P7", "B8_P9", "B8_P10", "B8_P11", 
+                                  "B9_P0", "B9_P1", "B9_P2", "B9_P3", "B9_P4", "B9_P5", "B9_P6", "B9_P7", "B9_P8", "B9_P10", "B9_P11", 
+                                  "B10_P0", "B10_P1", "B10_P2", "B10_P3", "B10_P4", "B10_P5", "B10_P6", "B10_P7", "B10_P8", "B10_P9", "B10_P11", 
+                                  "B11_P0", "B11_P1", "B11_P2", "B11_P3", "B11_P4", "B11_P5", "B11_P6", "B11_P7", "B11_P8", "B11_P9", "B11_P10")
+
+across_patient_ptob_comparisons=melted_correlations[melted_correlations$comparison %in% across_patient_ptob_comparisons, ]
+across_patient_ptob_comparisons$Type="Across_Patient_Primary_to_Metastasis"
+
+# Across patient P to P
+across_patient_ptop_comparisons=c("P0_P1", "P0_P2", "P0_P3", "P0_P4", "P0_P5", "P0_P6", "P0_P7",
+                                  "P0_P8", "P0_P9", "P0_P10", "P0_P11", "P1_P2", "P1_P3", 
+                                  "P1_P4", "P1_P5", "P1_P6", "P1_P7", "P1_P8", "P1_P9", "P1_P10", "P1_P11",
+                                  "P2_P3", "P2_P4", "P2_P5", "P2_P6", "P2_P7", "P2_P8", "P2_P9", "P2_P10", "P2_P11",
+                                  "P3_P4", "P3_P5", "P3_P6", "P3_P7", "P3_P8", "P3_P9", "P3_P10", "P3_P11",
+                                  "P4_P5", "P4_P6", "P4_P7", "P4_P8", "P4_P9", "P4_P10", "P4_P11",
+                                  "P5_P6", "P5_P7", "P5_P8", "P5_P9", "P5_P10", "P5_P11",
+                                  "P6_P7", "P6_P8", "P6_P9", "P6_P10", "P6_P11",
+                                  "P7_P8", "P7_P9", "P7_P10", "P7_P11",
+                                  "P8_P9", "P8_P10", "P8_P11",
+                                  "P9_P10", "P9_P11",
+                                  "P10_P11")
+across_patient_ptop_comparisons=melted_correlations[melted_correlations$comparison %in% across_patient_ptop_comparisons, ]
+across_patient_ptop_comparisons$Type="Across_Patient_Primary_to_Primary"
+
+# Across patient B to B
+across_patient_btob_comparisons=c("N0_B1", "B0_B2", "B0_B3", "B0_B4", "B0_B5", "B0_B6", "B0_B7",
+                                  "B0_B8", "B0_B9", "B0_B10", "B0_B11", "B1_B2", "B1_B3", 
+                                  "B1_B4", "B1_B5", "B1_B6", "B1_B7", "B1_B8", "B1_B9", "B1_B10", "B1_B11",
+                                  "B2_B3", "B2_B4", "B2_B5", "B2_B6", "B2_B7", "B2_B8", "B2_B9", "B2_B10", "B2_B11",
+                                  "B3_B4", "B3_B5", "B3_B6", "B3_B7", "B3_B8", "B3_B9", "B3_B10", "B3_B11",
+                                  "B4_B5", "B4_B6", "B4_B7", "B4_B8", "B4_B9", "B4_B10", "B4_B11",
+                                  "B5_B6", "B5_B7", "B5_B8", "B5_B9", "B5_B10", "B5_B11",
+                                  "B6_B7", "B6_B8", "B6_B9", "B6_B10", "B6_B11",
+                                  "B7_B8", "B7_B9", "B7_B10", "B7_B11",
+                                  "B8_B9", "B8_B10", "B8_B11",
+                                  "B9_B10", "B9_B11",
+                                  "B10_B11")
+across_patient_btob_comparisons=melted_correlations[melted_correlations$comparison %in% across_patient_btob_comparisons, ]
+across_patient_btob_comparisons$Type="Across_Patient_Metastasis_to_Metastasis"
+
+
+all_data=rbind(across_patient_nton_comparisons, within_patient_ntop_comparisons, within_patient_ptob_comparisons, across_patient_ntop_comparisons, across_patient_ptob_comparisons, across_patient_ptop_comparisons, across_patient_btob_comparisons)
+my_comparisons=list(c("Across_Patient_Normal_to_Primary", "Across_Patient_Primary_to_Metastasis"), c("Within_Patient_Primary_to_Metastasis", "Across_Patient_Normal_to_Primary"), c("Within_Patient_Primary_to_Metastasis", "Across_Patient_Primary_to_Metastasis"), c("Within_Patient_Primary_to_Metastasis", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Metastasis_to_Metastasis", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Primary_to_Primary", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Normal_to_Normal", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Primary_to_Metastasis", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Normal_to_Primary", "Within_Patient_Normal_to_Primary"), c("Across_Patient_Normal_to_Normal", "Within_Patient_Primary_to_Metastasis"), c("Across_Patient_Normal_to_Normal", "Across_Patient_Metastasis_to_Metastasis"), c("Across_Patient_Normal_to_Normal", "Across_Patient_Primary_to_Primary"), c("Across_Patient_Normal_to_Normal", "Across_Patient_Primary_to_Metastasis"), c("Across_Patient_Normal_to_Normal", "Across_Patient_Normal_to_Primary"), c("Across_Patient_Metastasis_to_Metastasis", "Across_Patient_Primary_to_Primary"), c("Across_Patient_Metastasis_to_Metastasis", "Within_Patient_Primary_to_Metastasis"), c("Across_Patient_Metastasis_to_Metastasis", "Across_Patient_Primary_to_Metastasis"), c("Across_Patient_Metastasis_to_Metastasis", "Across_Patient_Normal_to_Primary"), c("Across_Patient_Primary_to_Primary", "Within_Patient_Primary_to_Metastasis"), c("Across_Patient_Primary_to_Metastasis", "Across_Patient_Primary_to_Primary"), c("Across_Patient_Primary_to_Primary", "Across_Patient_Normal_to_Primary") )
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/differences_in_correlations_across_groups.pdf")
+ggboxplot(all_data, x="Type", y="value", color = "Type", palette = "jco", add = "jitter") + stat_compare_means(comparisons = my_comparisons, method="wilcox.test")
+dev.off()
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/differences_in_correlations_across_groups_significance_not_plotted.pdf")
+ggboxplot(all_data, x="Type", y="value", color = "Type", palette = "jco", add = "jitter") 
+dev.off()
+```
+
+### Figure S1G ###
+## Plot FGA vs. global autosomal methylation Pearson correlations between paired normal and primary samples
+```{r Plot FGA vs. global autosomal methylation Pearson correlations between paired normal and primary samples}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_d/fga_vs_pearson_correlation/plot_fga_vs_methylation_pearson_correlation_normal_vs_primary.r
+
+# Read in the FGA data
+fga_data=read.table(clinical_data, header=T, sep="\t")
+fga_data=fga_data[fga_data$Methylation.data=="YES",]
+fga_data$trio=c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0)
+fga_data=data.frame(fga=fga_data$FGA.Tumor., trio=fga_data$trio)
+
+# Read in the methylation pearson correlation scores
+methyl_pearson_corr_scores=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/within_patient_pearson_correlations_all_autosomal_cpgs.txt", header=T) #TO DO: need to show how this file was generated
+methyl_pearson_corr_scores=methyl_pearson_corr_scores[methyl_pearson_corr_scores$comparison_type=="Normal_vs_Primary",]
+
+# Combine the data
+data=merge(fga_data, methyl_pearson_corr_scores, by="trio")
+data=data[1:10,]
+data$fga=as.numeric(as.character(data$fga))
+
+# Plot the data
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_d/fga_vs_pearson_correlation/plots/fga_vs_pearson_correlations_normal_to_primary.pdf")
+ggplot(data, aes(x=correlation_value, y=fga)) + geom_point() + 
+  xlab("Methylation Pearson Correlation Score Normal vs Primary") + ylab("Fraction of Genome Altered (FGA) in Primary Tumor") + geom_smooth(method=lm, se = F) + 
+  geom_text(aes(x=-Inf,y=-Inf,hjust=0,vjust=0,label = lm_eqn(data, fga, correlation_value)), parse = TRUE, check_overlap = TRUE) +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_text(aes(label=trio),hjust=0, vjust=0)
+dev.off()
+
+```
+
+### Figure S1H ###
+## Plot FGA vs. tumor purity estimates for primary samples
+```{r Plot FGA vs. tumor purity estimates for primary samples}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/sample_purity/plot_pearson_correlations_vs_purity.r
+
+# This script plots the correlation of Pearson correlation scores (normal to primary and primary to metastasis) and purity scores.
+
+# Read in the Pearson correlation scores (all autosomal CpGs)
+correlations=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_b/autosomal_global/trio_pearson_correlations_all_autosomal_cpgs.txt", header=T)
+correlations=as.matrix(correlations)
+melted_correlations=melt(correlations)
+melted_correlations=as.data.frame(melted_correlations)
+melted_correlations$comparison=paste(melted_correlations$Var1, melted_correlations$Var2, sep="_")
+# Within patient N to P
+within_patient_ntop_comparisons=c("N0_P0", "N1_P1", "N2_P2", "N3_P3", "N4_P4", "N5_P5", "N6_P6", "N7_P7", "N8_P8", "N9_P9", "N10_P10", "N11_P11")
+within_patient_ntop_comparisons=melted_correlations[melted_correlations$comparison %in% within_patient_ntop_comparisons, ]
+within_patient_ntop_comparisons$Type="Within_Patient_Normal_to_Primary"
+# Within patient P to B
+within_patient_ptob_comparisons=c("B0_P0", "B1_P1", "B2_P2", "B3_P3", "B4_P4", "B5_P5", "B6_P6", "B7_P7", "B8_P8", "B9_P9", "B10_P10", "B11_P11")
+within_patient_ptob_comparisons=melted_correlations[melted_correlations$comparison %in% within_patient_ptob_comparisons, ]
+within_patient_ptob_comparisons$Type="Within_Patient_Primary_to_Metastasis"
+
+# Read in the purity esitmates per sample
+sample_characteristics=read.table(sample_purity_estimates, header=T, sep="\t")
+methylation_sample_characteristics=sample_characteristics[!is.na(sample_characteristics$Methylation.ID),]
+
+# Plot scatterplot of Pearson correlations (normal to primary within patient) vs primary sample purity
+data=data.frame(trio=c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+                normal_to_primary_pearson_correlations=c(within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N0_P0"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N1_P1"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N2_P2"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N3_P3"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N4_P4"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N5_P5"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N6_P6"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N7_P7"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N8_P8"],
+                                                         within_patient_ntop_comparisons$value[within_patient_ntop_comparisons$comparison=="N9_P9"]),
+                primary_sample_purity=c(methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P0"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P1"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P2"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P3"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P4"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P5"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P6"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P7"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P8"],
+                                        methylation_sample_characteristics$Sequenza.Purity[methylation_sample_characteristics$Methylation.ID=="P9"]))
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/sample_purity/plots/pearson_correlations_normal_to_primary_vs_primary_sample_purity.pdf")
+ggplot(data, aes(x=primary_sample_purity, y=normal_to_primary_pearson_correlations)) + geom_point() + 
+  ylab("Methylation Pearson Correlation Score Normal vs Primary") + xlab("Primary Tumor Purity Estimate") + geom_smooth(method=lm, se = F) + 
+  geom_text(aes(x=-Inf,y=-Inf,hjust=0,vjust=0,label = lm_eqn(data, normal_to_primary_pearson_correlations, primary_sample_purity)), parse = TRUE, check_overlap = TRUE) +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_text(aes(label=trio),hjust=0, vjust=0)
+dev.off()
+```
+
+### Figure S1I ###
+## Calculate and plot Pearson correlations for each pairwise combination of samples, using only autosomal promoter CpGs as input
+```{r Calculate and plot Pearson correlations for each pairwise combination of samples, using only autosomal promoter CpGs as input}
+# Adapted from:/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_d/methylcrf_pearson_correlations_promoter_autosomal_cpgs.r
+
+# Format the data for correlation analysis
+# Get the list of files for correlation analysis
+file_list <- list.files(path = "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_a/autosomal_promoter_temp_data", pattern="_mcrf_promoters.bed", full.names = TRUE)
+rm(dataset)
+
+for (file in file_list){
+  
+  current_sample_name=strsplit(file, "/")[[1]]
+  current_sample_name=tail(current_sample_name, n=1)
+  current_sample_name=strsplit(current_sample_name, "_")[[1]][1]
+  
+  # if the merged dataset doesn't exist, create it
+  if (!exists("dataset")) {
+    dataset <- read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(dataset))
+    dataset <- cbind(dataset, sample_name)
+  }
+  
+  # if the merged dataset does exist, append to it
+  else {
+    temp_dataset <-read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(temp_dataset))
+    temp_dataset <- cbind(temp_dataset, sample_name)
+    dataset<-rbind(dataset, temp_dataset)
+    rm(temp_dataset)
+  }
+}
+
+colnames(dataset) <- c("chr", "start", "stop", "site", "methylation_value", "sample")
+dataset2=subset(dataset, select = c(site,methylation_value,sample))
+
+# dcast (unmelt) the data
+dcast_data=dcast(data = dataset2,formula = sample~site,fun.aggregate = sum,value.var = "methylation_value")
+data<-dcast_data[,2:ncol(dcast_data)]
+labels<-dcast_data[,1]
+groups<-rep("na",length(labels))
+groups[labels=="B0"|labels=="B1"|labels=="B2"|labels=="B3"|labels=="B4"|labels=="B5"|labels=="B6"|labels=="B7"|labels=="B8"|labels=="B9"|labels=="B10"|labels=="B11"]="Metastasis"
+groups[labels=="N0"|labels=="N1"|labels=="N2"|labels=="N3"|labels=="N4"|labels=="N5"|labels=="N6"|labels=="N7"|labels=="N8"|labels=="N9"|labels=="N10"|labels=="N11"]="Normal"
+groups[labels=="P0"|labels=="P1"|labels=="P2"|labels=="P3"|labels=="P4"|labels=="P5"|labels=="P6"|labels=="P7"|labels=="P8"|labels=="P9"|labels=="P10"|labels=="P11"]="Primary"
+
+
+dcast_data_t=t(data)
+colnames(dcast_data_t)=labels
+
+# Perform Pearson Correlations on each pairwise combination of columns
+corr_mat=rcorr(dcast_data_t, type="pearson")
+write.table(corr_mat$r, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_h/trio_pearson_correlations_promoter_autosomal_cpgs.txt", col.names = TRUE, row.names = TRUE, quote = FALSE, sep="\t")
+
+
+# Create figures
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_h/plots/trio_pearson_correlations_promoter_autosomal_cpgs_heatmap.pdf")
+col<- colorRampPalette(c("blue", "white", "red"))(20)
+heatmap.2(x = corr_mat$r, col = col, symm = TRUE, key=TRUE, trace="none", tracecol = FALSE)
+dev.off()
+```
+
+### Figure 1D ###
+## Calculate and plot Principle Component Analysis using all samples and all autosomal CpGs as input
+```{r Calculate and plot Principle Component Analysis using all samples and all autosomal CpGs as input}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/pca_without_ROADMAP_data_arrows.R
+rm(dataset)
+file_list <- list.files(path = "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/methylCRF_scores_at_all_autosomal_cpg_sites", pattern=".bed", full.names = TRUE)
+
+for (file in file_list){
+  
+  current_sample_name=strsplit(file, "/")[[1]]
+  current_sample_name=tail(current_sample_name, n=1)
+  current_sample_name=strsplit(current_sample_name, "_")[[1]][1]
+ 
+  # if the merged dataset doesn't exist, create it
+  if (!exists("dataset")) {
+    dataset <- read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(dataset))
+    dataset <- cbind(dataset, sample_name)
+  }
+  
+  # if the merged dataset does exist, append to it
+  else {
+    temp_dataset <-read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(temp_dataset))
+    temp_dataset <- cbind(temp_dataset, sample_name)
+    dataset<-rbind(dataset, temp_dataset)
+    rm(temp_dataset)
+  }
+  
+}
+
+colnames(dataset) <- c("chr", "start", "stop", "site", "methylation_value", "sample")
+dataset2=subset(dataset, select = c(site,methylation_value,sample))
+
+#write.table(dataset2, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/methylCRF_values_at_all_autosomal_cpg_sites_all_trio_samples_arrows", col.names = FALSE, row.names = FALSE, quote = FALSE, sep="\t")
+
+
+# dcast (unmelt) the data
+dcast_data=dcast(data = dataset2,formula = sample~site,fun.aggregate = sum,value.var = "methylation_value")
+
+# PCA
+data<-dcast_data[,2:ncol(dcast_data)]
+labels<-dcast_data[,1]
+groups<-rep("na",length(labels))
+groups[labels=="B0"|labels=="B1"|labels=="B2"|labels=="B3"|labels=="B4"|labels=="B5"|labels=="B6"|labels=="B7"|labels=="B8"|labels=="B9"|labels=="B10"|labels=="B11"]="Metastasis"
+groups[labels=="N0"|labels=="N1"|labels=="N2"|labels=="N3"|labels=="N4"|labels=="N5"|labels=="N6"|labels=="N7"|labels=="N8"|labels=="N9"|labels=="N10"|labels=="N11"]="Normal"
+groups[labels=="P0"|labels=="P1"|labels=="P2"|labels=="P3"|labels=="P4"|labels=="P5"|labels=="P6"|labels=="P7"|labels=="P8"|labels=="P9"|labels=="P10"|labels=="P11"]="Primary"
+uniquelength <- sapply(data,function(x) length(unique(x)))
+new_data <- data[,uniquelength!=1]
+data.pca <- prcomp(new_data, center = TRUE, scale. = TRUE)
+
+#write.table(data.pca$rotation, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/rotations_matrix.txt", col.names = TRUE, row.names = TRUE, quote = FALSE, sep="\t")
+#write.table(data.pca$sdev, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/stdev_matrix.txt", col.names = FALSE, row.names = FALSE, quote = FALSE, sep="\t")
+#write.table(data.pca$x, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/scores_matrix.txt", col.names = TRUE, row.names = FALSE, quote = FALSE, sep="\t")
+
+# Variance explained:
+var_explained=data.pca$sdev^2 / sum(data.pca$sdev^2)
+cum_var_explained=cumsum(var_explained)
+pcs=seq(1, length(var_explained))
+group1=rep("Var_Explained", length(var_explained))
+group2=rep("Cum_Var_Explained", length(cum_var_explained))
+dat=data.frame(var_explained, pcs, group1)
+colnames(dat)=c("data", "pcs", ".group")
+dat2=data.frame(cum_var_explained, pcs, group2)
+colnames(dat2)=c("data", "pcs", ".group")
+dat3=rbind(dat, dat2)
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/pca_component_importance_global_autosomal_methylation_arrows_plot.pdf")
+p <- ggplot(dat3, aes(x=pcs, y=data, group=.group, colour=.group)) + geom_line() + xlab("Principle Components") + ylab("Percent Variance")
+p + theme(legend.position = 'top')
+print(p)
+dev.off()
+
+scores <- data.frame(labels, data.pca$x[,1:length(pcs)])
+pc1.2 <- qplot(x=PC1, y=PC2, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Global Autosomal CpG Methylation PC1vs2") + geom_segment(data=scores, mapping=aes(x=PC1[13], y=PC2[13], xend=PC1[25], yend=PC2[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[14], y=PC2[14], xend=PC1[26], yend=PC2[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[15], y=PC2[15], xend=PC1[27], yend=PC2[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[16], y=PC2[16], xend=PC1[28], yend=PC2[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[17], y=PC2[17], xend=PC1[29], yend=PC2[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[18], y=PC2[18], xend=PC1[30], yend=PC2[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[19], y=PC2[19], xend=PC1[31], yend=PC2[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[20], y=PC2[20], xend=PC1[32], yend=PC2[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[21], y=PC2[21], xend=PC1[33], yend=PC2[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[22], y=PC2[22], xend=PC1[34], yend=PC2[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[23], y=PC2[23], xend=PC1[35], yend=PC2[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[24], y=PC2[24], xend=PC1[36], yend=PC2[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[25], y=PC2[25], xend=PC1[1], yend=PC2[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[26], y=PC2[26], xend=PC1[2], yend=PC2[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[27], y=PC2[27], xend=PC1[3], yend=PC2[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[28], y=PC2[28], xend=PC1[4], yend=PC2[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[29], y=PC2[29], xend=PC1[5], yend=PC2[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[30], y=PC2[30], xend=PC1[6], yend=PC2[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[31], y=PC2[31], xend=PC1[7], yend=PC2[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[32], y=PC2[32], xend=PC1[8], yend=PC2[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[33], y=PC2[33], xend=PC1[9], yend=PC2[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[34], y=PC2[34], xend=PC1[10], yend=PC2[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[35], y=PC2[35], xend=PC1[11], yend=PC2[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[36], y=PC2[36], xend=PC1[12], yend=PC2[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")
+pc1.3 <- qplot(x=PC1, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Global CpG Methylation PC1vs3") + geom_segment(data=scores, mapping=aes(x=PC1[13], y=PC3[13], xend=PC1[25], yend=PC3[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[14], y=PC3[14], xend=PC1[26], yend=PC3[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[15], y=PC3[15], xend=PC1[27], yend=PC3[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[16], y=PC3[16], xend=PC1[28], yend=PC3[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[17], y=PC3[17], xend=PC1[29], yend=PC3[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[18], y=PC3[18], xend=PC1[30], yend=PC3[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[19], y=PC3[19], xend=PC1[31], yend=PC3[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[20], y=PC3[20], xend=PC1[32], yend=PC3[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[21], y=PC3[21], xend=PC1[33], yend=PC3[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[22], y=PC3[22], xend=PC1[34], yend=PC3[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[23], y=PC3[23], xend=PC1[35], yend=PC3[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[24], y=PC3[24], xend=PC1[36], yend=PC3[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[25], y=PC3[25], xend=PC1[1], yend=PC3[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[26], y=PC3[26], xend=PC1[2], yend=PC3[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[27], y=PC3[27], xend=PC1[3], yend=PC3[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[28], y=PC3[28], xend=PC1[4], yend=PC3[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[29], y=PC3[29], xend=PC1[5], yend=PC3[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[30], y=PC3[30], xend=PC1[6], yend=PC3[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[31], y=PC3[31], xend=PC1[7], yend=PC3[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[32], y=PC3[32], xend=PC1[8], yend=PC3[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[33], y=PC3[33], xend=PC1[9], yend=PC3[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[34], y=PC3[34], xend=PC1[10], yend=PC3[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[35], y=PC3[35], xend=PC1[11], yend=PC3[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[36], y=PC3[36], xend=PC1[12], yend=PC3[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")
+pc2.3 <- qplot(x=PC2, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Global CpG Methylation PC2vs3") + geom_segment(data=scores, mapping=aes(x=PC2[13], y=PC3[13], xend=PC2[25], yend=PC3[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC2[14], y=PC3[14], xend=PC2[26], yend=PC3[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC2[15], y=PC3[15], xend=PC2[27], yend=PC3[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[16], y=PC3[16], xend=PC2[28], yend=PC3[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[17], y=PC3[17], xend=PC2[29], yend=PC3[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[18], y=PC3[18], xend=PC2[30], yend=PC3[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[19], y=PC3[19], xend=PC2[31], yend=PC3[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[20], y=PC3[20], xend=PC2[32], yend=PC3[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[21], y=PC3[21], xend=PC2[33], yend=PC3[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[22], y=PC3[22], xend=PC2[34], yend=PC3[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[23], y=PC3[23], xend=PC2[35], yend=PC3[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[24], y=PC3[24], xend=PC2[36], yend=PC3[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[25], y=PC3[25], xend=PC2[1], yend=PC3[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[26], y=PC3[26], xend=PC2[2], yend=PC3[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[27], y=PC3[27], xend=PC2[3], yend=PC3[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[28], y=PC3[28], xend=PC2[4], yend=PC3[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[29], y=PC3[29], xend=PC2[5], yend=PC3[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[30], y=PC3[30], xend=PC2[6], yend=PC3[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[31], y=PC3[31], xend=PC2[7], yend=PC3[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[32], y=PC3[32], xend=PC2[8], yend=PC3[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[33], y=PC3[33], xend=PC2[9], yend=PC3[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[34], y=PC3[34], xend=PC2[10], yend=PC3[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[35], y=PC3[35], xend=PC2[11], yend=PC3[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[36], y=PC3[36], xend=PC2[12], yend=PC3[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")
+
+ 
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/pc1_2_global_autosomal_methylation_11122017_with_arrows.pdf")
+print(pc1.2)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/pc1_3_global_autosomal_methylation_11122017_with_arrows.pdf")
+print(pc1.3)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/pc2_3_global_autosomal_methylation_11122017_with_arrows.pdf")
+print(pc2.3)
+dev.off()
+
+print("finished with PCA")
+
+write.table(data.pca$rotation, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/global_autosomal_rotations_matrix", col.names = TRUE, row.names = TRUE, quote = FALSE, sep="\t")
+```
+
+### Figure 1E ###
+## Calculate and plot distances between samples in PCA space, scaled by percent variance explained using all autosomal CpGs as input
+```{r Calculate and plot distances between samples in PCA space, scaled by percent variance explained using all autosomal CpGs as input}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_f/global/calculate_and_plot_distances_in_pca_space_scaled_by_percent_var_explained_global_autosomal.r
+# This script reads in the PCA locations and standard deviation data from the PCA analysis using all global autosomal CpGs, and calculates the Euclidean distance between samples in PCA space, scaled by the percent variance explained in each PC.
+
+stdev=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/stdev_matrix.txt")
+scores=read.table("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_e/autosomal_methylation_only/global/results/scores_matrix.txt", header=TRUE)
+
+var_explained=stdev^2 / sum(stdev^2)
+
+
+# Calculate distances scaled by the percent variance explained in the principal components
+eucDist <- function (x1, x2) sqrt(sum((x1-x2)^2))
+eucDistScaled <- function (x1, x2, v) sqrt(sum(((x1-x2)*v)^2))
+
+# Normal to primary euclidean distances in PCA space, scaled by % variance explained
+trio_0_ntop_scaled_distance=eucDistScaled(scores[13,], scores[25,], t(var_explained))
+trio_1_ntop_scaled_distance=eucDistScaled(scores[14,], scores[26,], t(var_explained))
+trio_2_ntop_scaled_distance=eucDistScaled(scores[17,], scores[29,], t(var_explained))
+trio_3_ntop_scaled_distance=eucDistScaled(scores[18,], scores[30,], t(var_explained))
+trio_4_ntop_scaled_distance=eucDistScaled(scores[19,], scores[31,], t(var_explained))
+trio_5_ntop_scaled_distance=eucDistScaled(scores[20,], scores[32,], t(var_explained))
+trio_6_ntop_scaled_distance=eucDistScaled(scores[21,], scores[33,], t(var_explained))
+trio_7_ntop_scaled_distance=eucDistScaled(scores[22,], scores[34,], t(var_explained))
+trio_8_ntop_scaled_distance=eucDistScaled(scores[23,], scores[35,], t(var_explained))
+trio_9_ntop_scaled_distance=eucDistScaled(scores[24,], scores[36,], t(var_explained))
+trio_10_ntop_scaled_distance=eucDistScaled(scores[15,], scores[27,], t(var_explained))
+trio_11_ntop_scaled_distance=eucDistScaled(scores[16,], scores[28,], t(var_explained))
+# Primary to metastasis euclidean distances in PCA space, scaled by % variance explained
+trio_0_pto_b_scaled_distance=eucDistScaled(scores[25,], scores[1,], t(var_explained))
+trio_1_pto_b_scaled_distance=eucDistScaled(scores[26,], scores[2,], t(var_explained))
+trio_2_pto_b_scaled_distance=eucDistScaled(scores[29,], scores[5,], t(var_explained))
+trio_3_pto_b_scaled_distance=eucDistScaled(scores[30,], scores[6,], t(var_explained))
+trio_4_pto_b_scaled_distance=eucDistScaled(scores[31,], scores[7,], t(var_explained))
+trio_5_pto_b_scaled_distance=eucDistScaled(scores[32,], scores[8,], t(var_explained))
+trio_6_pto_b_scaled_distance=eucDistScaled(scores[33,], scores[9,], t(var_explained))
+trio_7_pto_b_scaled_distance=eucDistScaled(scores[34,], scores[10,], t(var_explained))
+trio_8_pto_b_scaled_distance=eucDistScaled(scores[35,], scores[11,], t(var_explained))
+trio_9_pto_b_scaled_distance=eucDistScaled(scores[36,], scores[12,], t(var_explained))
+trio_10_pto_b_scaled_distance=eucDistScaled(scores[27,], scores[3,], t(var_explained))
+trio_11_pto_b_scaled_distance=eucDistScaled(scores[28,], scores[4,], t(var_explained))
+
+data = data.frame(distances=c(trio_0_ntop_scaled_distance, trio_1_ntop_scaled_distance,
+                              trio_2_ntop_scaled_distance, trio_3_ntop_scaled_distance,
+                              trio_4_ntop_scaled_distance, trio_5_ntop_scaled_distance,
+                              trio_6_ntop_scaled_distance, trio_7_ntop_scaled_distance,
+                              trio_8_ntop_scaled_distance, trio_9_ntop_scaled_distance,
+                              trio_10_ntop_scaled_distance, trio_11_ntop_scaled_distance,
+                              trio_0_pto_b_scaled_distance, trio_1_pto_b_scaled_distance,
+                              trio_2_pto_b_scaled_distance, trio_3_pto_b_scaled_distance,
+                              trio_4_pto_b_scaled_distance, trio_5_pto_b_scaled_distance,
+                              trio_6_pto_b_scaled_distance, trio_7_pto_b_scaled_distance,
+                              trio_8_pto_b_scaled_distance, trio_9_pto_b_scaled_distance,
+                              trio_10_pto_b_scaled_distance, trio_11_pto_b_scaled_distance),
+                  category=c(rep("Normal_to_Primary", 12), rep("Primary_to_Metastasis", 12)))
+
+# Plot histograms of scaled PCA distances:
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_f/global/results/scaled_PCA_distance_distributions_ntop_and_ptob_within_patients_global_autosomal.pdf")
+ggplot(data, aes(x=distances)) + 
+  geom_histogram(data=subset(data,category == 'Normal_to_Primary'),
+                 aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=20,
+                 colour="black", fill="orange", alpha = 0.25) +
+  geom_density(data=subset(data,category == 'Normal_to_Primary'), alpha=.25, fill="orange") +
+  geom_histogram(data=subset(data,category == 'Primary_to_Metastasis'),
+                 aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=20,
+                 colour="black", fill="purple", alpha = 0.25) +
+  geom_density(data=subset(data,category == 'Primary_to_Metastasis'), alpha=.25, fill="purple") +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+dev.off()
+
+# Plot boxplots of scaled distances
+my_comparisons=list(c("Normal_to_Primary", "Primary_to_Metastasis"))
+data$label=rep(c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), 2)
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_f/global/results/scaled_PCA_distance_boxplots_ntop_and_ptob_within_patients_global_autosomal.pdf")
+ggpaired(data, x="category", y="distances", color = "category", label="label", line.color="grey", line.size = 0.5) + stat_compare_means(comparisons = my_comparisons, method="wilcox.test", paired = T)
+dev.off()
+
+```
+
+### Figure S1J ###
+## Calculate and plot Principle Component Analysis using all samples and only promoter autosomal CpGs as input
+```{r Calculate and plot Principle Component Analysis using all samples and only promoter autosomal CpGs as input}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pca_without_ROADMAP_data.R
+rm(dataset)
+
+# Get the list of files for PCA
+file_list <- list.files(path = "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1/panel_c/using_new_annotation_files_as_of_11062018/autosomal_genomic_overlap_files", pattern="promoter", full.names = TRUE) #TO DO: list how these files were created.
+
+for (file in file_list){
+  
+  current_sample_name=strsplit(file, "/")[[1]]
+  current_sample_name=tail(current_sample_name, n=1)
+  current_sample_name=strsplit(current_sample_name, "_")[[1]][1]
+ 
+  # if the merged dataset doesn't exist, create it
+  if (!exists("dataset")) {
+    dataset <- read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(dataset))
+    dataset <- cbind(dataset, sample_name)
+  }
+  
+  # if the merged dataset does exist, append to it
+  else {
+    temp_dataset <-read.table(file, header=FALSE, sep="\t")
+    sample_name <- rep(current_sample_name,nrow(temp_dataset))
+    temp_dataset <- cbind(temp_dataset, sample_name)
+    dataset<-rbind(dataset, temp_dataset)
+    rm(temp_dataset)
+  }
+  
+}
+
+colnames(dataset) <- c("chr", "start", "stop", "site", "methylation_value", "sample")
+dataset2=subset(dataset, select = c(site,methylation_value,sample))
+
+write.table(dataset2, "/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/methylCRF_values_at_autosomal_promoter_cpg_sites_only_all_trio_samples", col.names = FALSE, row.names = FALSE, quote = FALSE, sep="\t")
+
+
+# dcast (unmelt) the data
+dcast_data=dcast(data = dataset2,formula = sample~site,fun.aggregate = sum,value.var = "methylation_value")
+
+# PCA
+data<-dcast_data[,2:ncol(dcast_data)]
+labels<-dcast_data[,1]
+groups<-rep("na",length(labels))
+groups[labels=="B0"|labels=="B1"|labels=="B2"|labels=="B3"|labels=="B4"|labels=="B5"|labels=="B6"|labels=="B7"|labels=="B8"|labels=="B9"|labels=="B10"|labels=="B11"]="Metastasis"
+groups[labels=="N0"|labels=="N1"|labels=="N2"|labels=="N3"|labels=="N4"|labels=="N5"|labels=="N6"|labels=="N7"|labels=="N8"|labels=="N9"|labels=="N10"|labels=="N11"]="Normal"
+groups[labels=="P0"|labels=="P1"|labels=="P2"|labels=="P3"|labels=="P4"|labels=="P5"|labels=="P6"|labels=="P7"|labels=="P8"|labels=="P9"|labels=="P10"|labels=="P11"]="Primary"
+
+# apply PCA - scale. = TRUE is highly advisable, but default is FALSE. 
+uniquelength <- sapply(data,function(x) length(unique(x)))
+new_data <- data[,uniquelength!=1]
+data.pca <- prcomp(new_data, center = TRUE, scale = TRUE)
+
+
+# Variance explained:
+var_explained=data.pca$sdev^2 / sum(data.pca$sdev^2)
+cum_var_explained=cumsum(var_explained)
+pcs=seq(1, length(var_explained))
+group1=rep("Var_Explained", length(var_explained))
+group2=rep("Cum_Var_Explained", length(cum_var_explained))
+dat=data.frame(var_explained, pcs, group1)
+colnames(dat)=c("data", "pcs", "group")
+dat2=data.frame(cum_var_explained, pcs, group2)
+colnames(dat2)=c("data", "pcs", "group")
+dat3=rbind(dat, dat2)
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pca_component_importance_autosomaml_promoter_methylation_new_annotations_11122017.pdf")
+p <- ggplot(dat3, aes(x=pcs, y=data, group=group, colour=group)) + geom_line() + xlab("Principle Components") + ylab("Percent Variance")
+p + theme(legend.position = 'top')+theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+                                                         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+print(p)
+dev.off()
+
+scores <- data.frame(labels, data.pca$x[,1:length(pcs)])
+pc1.2 <- qplot(x=PC1, y=PC2, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC1vs2")+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+pc1.3 <- qplot(x=PC1, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC1vs3")+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+pc2.3 <- qplot(x=PC2, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC2vs3")+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ 
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc1_2_promoter_autosomal_methylation_11122017.pdf")
+print(pc1.2)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc1_3_promoter_autosomal_methylation_11122017.pdf")
+print(pc1.3)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc2_3_promoter_autosomal_methylation_11122017.pdf")
+print(pc2.3)
+dev.off()
+
+# PCA with arrows:
+pc1.2 <- qplot(x=PC1, y=PC2, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC1vs2") + geom_segment(data=scores, mapping=aes(x=PC1[13], y=PC2[13], xend=PC1[25], yend=PC2[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[14], y=PC2[14], xend=PC1[26], yend=PC2[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[15], y=PC2[15], xend=PC1[27], yend=PC2[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[16], y=PC2[16], xend=PC1[28], yend=PC2[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[17], y=PC2[17], xend=PC1[29], yend=PC2[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[18], y=PC2[18], xend=PC1[30], yend=PC2[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[19], y=PC2[19], xend=PC1[31], yend=PC2[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[20], y=PC2[20], xend=PC1[32], yend=PC2[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[21], y=PC2[21], xend=PC1[33], yend=PC2[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[22], y=PC2[22], xend=PC1[34], yend=PC2[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[23], y=PC2[23], xend=PC1[35], yend=PC2[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[24], y=PC2[24], xend=PC1[36], yend=PC2[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[25], y=PC2[25], xend=PC1[1], yend=PC2[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[26], y=PC2[26], xend=PC1[2], yend=PC2[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[27], y=PC2[27], xend=PC1[3], yend=PC2[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[28], y=PC2[28], xend=PC1[4], yend=PC2[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[29], y=PC2[29], xend=PC1[5], yend=PC2[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[30], y=PC2[30], xend=PC1[6], yend=PC2[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[31], y=PC2[31], xend=PC1[7], yend=PC2[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[32], y=PC2[32], xend=PC1[8], yend=PC2[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[33], y=PC2[33], xend=PC1[9], yend=PC2[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[34], y=PC2[34], xend=PC1[10], yend=PC2[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[35], y=PC2[35], xend=PC1[11], yend=PC2[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[36], y=PC2[36], xend=PC1[12], yend=PC2[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+pc1.3 <- qplot(x=PC1, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC1vs3") + geom_segment(data=scores, mapping=aes(x=PC1[13], y=PC3[13], xend=PC1[25], yend=PC3[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[14], y=PC3[14], xend=PC1[26], yend=PC3[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC1[15], y=PC3[15], xend=PC1[27], yend=PC3[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[16], y=PC3[16], xend=PC1[28], yend=PC3[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[17], y=PC3[17], xend=PC1[29], yend=PC3[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[18], y=PC3[18], xend=PC1[30], yend=PC3[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[19], y=PC3[19], xend=PC1[31], yend=PC3[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[20], y=PC3[20], xend=PC1[32], yend=PC3[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[21], y=PC3[21], xend=PC1[33], yend=PC3[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[22], y=PC3[22], xend=PC1[34], yend=PC3[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[23], y=PC3[23], xend=PC1[35], yend=PC3[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[24], y=PC3[24], xend=PC1[36], yend=PC3[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC1[25], y=PC3[25], xend=PC1[1], yend=PC3[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[26], y=PC3[26], xend=PC1[2], yend=PC3[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[27], y=PC3[27], xend=PC1[3], yend=PC3[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[28], y=PC3[28], xend=PC1[4], yend=PC3[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[29], y=PC3[29], xend=PC1[5], yend=PC3[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[30], y=PC3[30], xend=PC1[6], yend=PC3[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[31], y=PC3[31], xend=PC1[7], yend=PC3[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[32], y=PC3[32], xend=PC1[8], yend=PC3[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[33], y=PC3[33], xend=PC1[9], yend=PC3[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[34], y=PC3[34], xend=PC1[10], yend=PC3[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[35], y=PC3[35], xend=PC1[11], yend=PC3[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC1[36], y=PC3[36], xend=PC1[12], yend=PC3[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+pc2.3 <- qplot(x=PC2, y=PC3, data=scores, colour=factor(groups), label=labels) + geom_text(aes(label=labels),hjust=0, vjust=-0.7) + theme(legend.position = 'right', plot.title = element_text(hjust = 0.5)) + labs(color="Sample Type", title="Trio methylCRF Autosomal Promoter CpG Methylation PC2vs3") + geom_segment(data=scores, mapping=aes(x=PC2[13], y=PC3[13], xend=PC2[25], yend=PC3[25]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC2[14], y=PC3[14], xend=PC2[26], yend=PC3[26]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange") + geom_segment(data=scores, mapping=aes(x=PC2[15], y=PC3[15], xend=PC2[27], yend=PC3[27]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[16], y=PC3[16], xend=PC2[28], yend=PC3[28]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[17], y=PC3[17], xend=PC2[29], yend=PC3[29]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[18], y=PC3[18], xend=PC2[30], yend=PC3[30]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[19], y=PC3[19], xend=PC2[31], yend=PC3[31]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[20], y=PC3[20], xend=PC2[32], yend=PC3[32]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[21], y=PC3[21], xend=PC2[33], yend=PC3[33]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[22], y=PC3[22], xend=PC2[34], yend=PC3[34]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[23], y=PC3[23], xend=PC2[35], yend=PC3[35]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[24], y=PC3[24], xend=PC2[36], yend=PC3[36]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="orange")+ geom_segment(data=scores, mapping=aes(x=PC2[25], y=PC3[25], xend=PC2[1], yend=PC3[1]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[26], y=PC3[26], xend=PC2[2], yend=PC3[2]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[27], y=PC3[27], xend=PC2[3], yend=PC3[3]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[28], y=PC3[28], xend=PC2[4], yend=PC3[4]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[29], y=PC3[29], xend=PC2[5], yend=PC3[5]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[30], y=PC3[30], xend=PC2[6], yend=PC3[6]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[31], y=PC3[31], xend=PC2[7], yend=PC3[7]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[32], y=PC3[32], xend=PC2[8], yend=PC3[8]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[33], y=PC3[33], xend=PC2[9], yend=PC3[9]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[34], y=PC3[34], xend=PC2[10], yend=PC3[10]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[35], y=PC3[35], xend=PC2[11], yend=PC3[11]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple")+ geom_segment(data=scores, mapping=aes(x=PC2[36], y=PC3[36], xend=PC2[12], yend=PC3[12]), arrow=arrow(length=unit(0.30,"cm")), size=.5, color="purple") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc1_2_promoter_autosomal_methylation_with_arrows_11122017.pdf")
+print(pc1.2)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc1_3_promoter_autosomal_methylation_with_arrows_11122017.pdf")
+print(pc1.3)
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/pc2_3_promoter_autosomal_methylation_with_arrows_11122017.pdf")
+print(pc2.3)
+dev.off()
+
+# Calculate distances scaled by the percent variance explained in the principal components
+eucDist <- function (x1, x2) sqrt(sum((x1-x2)^2))
+eucDistScaled <- function (x1, x2, v) sqrt(sum(((x1-x2)*v)^2))
+
+# Normal to primary euclidean distances in PCA space, scaled by % variance explained
+trio_0_ntop_scaled_distance=eucDistScaled(data.pca$x[13,], data.pca$x[25,], var_explained)
+trio_1_ntop_scaled_distance=eucDistScaled(data.pca$x[14,], data.pca$x[26,], var_explained)
+trio_2_ntop_scaled_distance=eucDistScaled(data.pca$x[17,], data.pca$x[29,], var_explained)
+trio_3_ntop_scaled_distance=eucDistScaled(data.pca$x[18,], data.pca$x[30,], var_explained)
+trio_4_ntop_scaled_distance=eucDistScaled(data.pca$x[19,], data.pca$x[31,], var_explained)
+trio_5_ntop_scaled_distance=eucDistScaled(data.pca$x[20,], data.pca$x[32,], var_explained)
+trio_6_ntop_scaled_distance=eucDistScaled(data.pca$x[21,], data.pca$x[33,], var_explained)
+trio_7_ntop_scaled_distance=eucDistScaled(data.pca$x[22,], data.pca$x[34,], var_explained)
+trio_8_ntop_scaled_distance=eucDistScaled(data.pca$x[23,], data.pca$x[35,], var_explained)
+trio_9_ntop_scaled_distance=eucDistScaled(data.pca$x[24,], data.pca$x[36,], var_explained)
+trio_10_ntop_scaled_distance=eucDistScaled(data.pca$x[15,], data.pca$x[27,], var_explained)
+trio_11_ntop_scaled_distance=eucDistScaled(data.pca$x[16,], data.pca$x[28,], var_explained)
+# Primary to metastasis euclidean distances in PCA space, scaled by % variance explained
+trio_0_pto_b_scaled_distance=eucDistScaled(data.pca$x[25,], data.pca$x[1,], var_explained)
+trio_1_pto_b_scaled_distance=eucDistScaled(data.pca$x[26,], data.pca$x[2,], var_explained)
+trio_2_pto_b_scaled_distance=eucDistScaled(data.pca$x[29,], data.pca$x[5,], var_explained)
+trio_3_pto_b_scaled_distance=eucDistScaled(data.pca$x[30,], data.pca$x[6,], var_explained)
+trio_4_pto_b_scaled_distance=eucDistScaled(data.pca$x[31,], data.pca$x[7,], var_explained)
+trio_5_pto_b_scaled_distance=eucDistScaled(data.pca$x[32,], data.pca$x[8,], var_explained)
+trio_6_pto_b_scaled_distance=eucDistScaled(data.pca$x[33,], data.pca$x[9,], var_explained)
+trio_7_pto_b_scaled_distance=eucDistScaled(data.pca$x[34,], data.pca$x[10,], var_explained)
+trio_8_pto_b_scaled_distance=eucDistScaled(data.pca$x[35,], data.pca$x[11,], var_explained)
+trio_9_pto_b_scaled_distance=eucDistScaled(data.pca$x[36,], data.pca$x[12,], var_explained)
+trio_10_pto_b_scaled_distance=eucDistScaled(data.pca$x[27,], data.pca$x[3,], var_explained)
+trio_11_pto_b_scaled_distance=eucDistScaled(data.pca$x[28,], data.pca$x[4,], var_explained)
+
+# Plot histograms of scaled PCA distances:
+data = data.frame(distances=c(trio_0_ntop_scaled_distance, trio_1_ntop_scaled_distance,
+                           trio_2_ntop_scaled_distance, trio_3_ntop_scaled_distance,
+                           trio_4_ntop_scaled_distance, trio_5_ntop_scaled_distance,
+                           trio_6_ntop_scaled_distance, trio_7_ntop_scaled_distance,
+                           trio_8_ntop_scaled_distance, trio_9_ntop_scaled_distance,
+                           trio_10_ntop_scaled_distance, trio_11_ntop_scaled_distance,
+                           trio_0_pto_b_scaled_distance, trio_1_pto_b_scaled_distance,
+                           trio_2_pto_b_scaled_distance, trio_3_pto_b_scaled_distance,
+                           trio_4_pto_b_scaled_distance, trio_5_pto_b_scaled_distance,
+                           trio_6_pto_b_scaled_distance, trio_7_pto_b_scaled_distance,
+                           trio_8_pto_b_scaled_distance, trio_9_pto_b_scaled_distance,
+                           trio_10_pto_b_scaled_distance, trio_11_pto_b_scaled_distance),
+                  category=c(rep("Normal_to_Primary", 12), rep("Primary_to_Metastasis", 12)))
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/scaled_PCA_distance_distributions_ntop_and_ptob_within_patients.pdf")
+ggplot(data, aes(x=distances)) + 
+  geom_histogram(data=subset(data,category == 'Normal_to_Primary'),
+                 aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=10,
+                 colour="black", fill="orange", alpha = 0.25) +
+  geom_density(data=subset(data,category == 'Normal_to_Primary'), alpha=.25, fill="orange") +
+  geom_histogram(data=subset(data,category == 'Primary_to_Metastasis'),
+                 aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=10,
+                 colour="black", fill="purple", alpha = 0.25) +
+  geom_density(data=subset(data,category == 'Primary_to_Metastasis'), alpha=.25, fill="purple") +
+  theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+                             panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+dev.off()
+
+# Plot boxplots of scaled distances
+my_comparisons=list(c("Normal_to_Primary", "Primary_to_Metastasis"))
+data$label=rep(c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), 2)
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_1S/panel_f/scaled_PCA_distance_boxplots_ntop_and_ptob_within_patients_promoter_autosomal.pdf")
+ggpaired(data, x="category", y="distances", color = "category", label="label", line.color="grey", line.size = 0.5) + stat_compare_means(comparisons = my_comparisons, method="wilcox.test", paired = T)
+dev.off()
+
+```
+
+##### PICK UP HERE FOR FIGURE 2 #####
+# So far, in figure 1, I used "/bar/jflynn/data/hg19/genomic_features/refseq_promoters_merge.txt" for promoters for most analyses, but then "/scratch/jflynn/hg19/RefSeq/UCSC_NCBI_RefSeq_gene_promoters_sorted_merged.txt" for promoters in Figure S1J. Need to look into this more. They are very similar but slightly different files. Both are RefSeq though.
+
+### Figure S2A ###
+## Calculate the number of DMRs per patient for each disease state comparison
+```{bash Calculate the number of DMRs per patient for each disease state comparison}
+# Adapted from: /bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/determine_number_of_DMRs_per_patient.sh
+
+output_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/number_of_autosomal_DMRs_per_trio.txt"
+echo -e "Trio_Number""\t""Normal_to_Primary_HyperDMRs""\t""Normal_to_Primary_HypoDMRs""\t""Primary_to_Metastasis_HyperDMRs""\t""Primary_to_Metastasis_HypoDMRs""\t""Normal_to_Metastasis_HyperDMRs""\t""Normal_to_Metastasis_HypoDMRs" > $output_file
+trio_numbers=(0 1 2 3 4 5 6 7 8 9 10 11)
+for number in ${trio_numbers[*]}
+do
+	# Number of Normal to Primary HyperDMRs
+	n_to_p_hyper_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hypoDMRs_N"$number"_P"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	n_to_p_hyper_number=$(cat $n_to_p_hyper_file | wc -l)
+	n_to_p_hyper_number_minus_header=$((n_to_p_hyper_number - 1))
+
+	# Number of Normal to Primary HypoDMRs
+	n_to_p_hypo_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hyperDMRs_N"$number"_P"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	n_to_p_hypo_number=$(cat $n_to_p_hypo_file | wc -l)
+	n_to_p_hypo_number_minus_header=$((n_to_p_hypo_number - 1))
+
+	# Number of Primary to Metastasis HyperDMRs
+	p_to_b_hyper_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hyperDMRs_B"$number"_P"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	p_to_b_hyper_number=$(cat $p_to_b_hyper_file | wc -l)
+	p_to_b_hyper_number_minus_header=$((p_to_b_hyper_number - 1))
+
+	# Number of Primary to Metastasis HypoDMRs
+	p_to_b_hypo_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hypoDMRs_B"$number"_P"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	p_to_b_hypo_number=$(cat $p_to_b_hypo_file | wc -l)
+	p_to_b_hypo_number_minus_header=$((p_to_b_hypo_number - 1))
+
+	# Number of Normal to Metastasis HyperDMRs
+	n_to_b_hyper_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hyperDMRs_B"$number"_N"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	n_to_b_hyper_number=$(cat $n_to_b_hyper_file | wc -l)
+	n_to_b_hyper_number_minus_header=$((n_to_b_hyper_number - 1))
+
+	# Number of Normal to Metastasis HypoDMRs
+	n_to_b_hypo_file="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/hypoDMRs_B"$number"_N"$number"_q_value_threshold_of_0.00001_autosomal_only.bed"
+	n_to_b_hypo_number=$(cat $n_to_b_hypo_file | wc -l)
+	n_to_b_hypo_number_minus_header=$((n_to_b_hypo_number - 1))
+
+	echo -e $number"\t"$n_to_p_hyper_number_minus_header"\t"$n_to_p_hypo_number_minus_header"\t"$p_to_b_hyper_number_minus_header"\t"$p_to_b_hypo_number_minus_header"\t"$n_to_b_hyper_number_minus_header"\t"$n_to_b_hypo_number_minus_header >> $output_file
+done
+```
+
+## Plot the number on intrapatient DMRs (Hyper and Hypo, seperately), comparing normal to metastasis, primary to metastasis, and normal to primary ### PICK UP HERE - MAKE SURE P-VALUES MATCH ONES REPORTED IN PAPER ###
+```{r Calculate and plot Principle Component Analysis using all samples and only promoter autosomal CpGs as input}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/figures/figure_2/panel_b/plot_boxplots_of_number_of_DMRs_in_different_disease_groups.r
+
+# Read in the number of autosomal DMRs per patient
+data=read.table("/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/MnM/MnM_on_files_I_aligned/alignments_as_of_11032017/aligned_using_q10_cutadapt_cutoff/MnM_output/q_val_0.00001/autosomal_only/number_of_autosomal_DMRs_per_trio.txt", header=TRUE)
+
+# Melt the data
+data$Trio_Number=as.factor(data$Trio_Number)
+melted_data=melt(data)
+melted_data$Trio_Number <- factor(melted_data$Trio_Number, levels = c(11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0))
+DMR_type=data.frame(do.call('rbind', strsplit(as.character(melted_data$variable),'_',fixed=TRUE)))
+melted_data$DMR_type=DMR_type$X4
+comparison_type=data.frame(do.call('rbind', strsplit(as.character(melted_data$variable),'_H',fixed=TRUE)))
+melted_data$comparison_type=comparison_type$X1
+melted_data$comparison_type <- factor(melted_data$comparison_type, levels = c("Normal_to_Metastasis", "Primary_to_Metastasis", "Normal_to_Primary"))
+hyper_DMRs_data=melted_data[melted_data$DMR_type=="HyperDMRs",]
+hypo_DMRs_data=melted_data[melted_data$DMR_type=="HypoDMRs",]
+ratio_of_hyper_to_hypo_DMRs=data.frame(Trio_Number=hyper_DMRs_data$Trio_Number, comparison_type=hyper_DMRs_data$comparison_type, value=(hyper_DMRs_data$value + 1)/(hypo_DMRs_data$value + 1))
+
+# Select colors
+b=colorRampPalette(c("orange", "blue"))
+col <- b(3)
+
+# Plot the data
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_2/panel_b/plots/number_of_hyperDMRs_across_different_disease_groups_box_plot.pdf")
+my_comparisons=list(c("Normal_to_Primary", "Primary_to_Metastasis"), c("Normal_to_Primary", "Normal_to_Metastasis"), c("Primary_to_Metastasis", "Normal_to_Metastasis"))
+hyper_DMRs_data$comparison_type=factor(hyper_DMRs_data$comparison_type, levels = c("Normal_to_Metastasis", "Normal_to_Primary", "Primary_to_Metastasis"))
+p=ggpaired(hyper_DMRs_data, x = "comparison_type", y = "value", id = "Trio_Number", line.color = "gray", line.size = 0.4, label = "Trio_Number", repel = TRUE, palette = c(col[2], col[1], col[3]), color="comparison_type")+
+  stat_compare_means(paired = TRUE, method = "wilcox.test", comparisons = my_comparisons)
+p + scale_y_continuous(name = "Number of HyperDMRs") + theme(plot.title = element_text(hjust = 0.5), legend.position="non") + theme(axis.title.y = element_text(size=10), axis.text.y = element_text(size=10), axis.text.x = element_text(size=10, angle=90), axis.ticks.x = element_blank(), axis.title.x = element_text(size=0))
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_2/panel_b/plots/number_of_hypoDMRs_across_different_disease_groups_box_plot.pdf")
+my_comparisons=list(c("Normal_to_Primary", "Primary_to_Metastasis"), c("Normal_to_Primary", "Normal_to_Metastasis"), c("Primary_to_Metastasis", "Normal_to_Metastasis"))
+hypo_DMRs_data$comparison_type=factor(hypo_DMRs_data$comparison_type, levels = c("Normal_to_Metastasis", "Normal_to_Primary", "Primary_to_Metastasis"))
+p=ggpaired(hypo_DMRs_data, x = "comparison_type", y = "value", id = "Trio_Number", line.color = "gray", line.size = 0.4, label = "Trio_Number", repel = TRUE, palette = c(col[2], col[1], col[3]), color="comparison_type")+
+  stat_compare_means(paired = TRUE, method = "wilcox.test", comparisons = my_comparisons)
+p + scale_y_continuous(name = "Number of HypoDMRs") + theme(plot.title = element_text(hjust = 0.5), legend.position="non") + theme(axis.title.y = element_text(size=10), axis.text.y = element_text(size=10), axis.text.x = element_text(size=10, angle=90), axis.ticks.x = element_blank(), axis.title.x = element_text(size=0))
+dev.off()
+
+pdf("/tavern/jflynn/Projects/metastasis/trios/figures/figure_2/panel_b/plots/proportion_of_DMRs_that_are_hyper_vs_hypo_across_different_disease_groups_box_plot.pdf")
+my_comparisons=list(c("Normal_to_Primary", "Primary_to_Metastasis"), c("Normal_to_Primary", "Normal_to_Metastasis"), c("Primary_to_Metastasis", "Normal_to_Metastasis"))
+ratio_of_hyper_to_hypo_DMRs$comparison_type=factor(ratio_of_hyper_to_hypo_DMRs$comparison_type, levels = c("Normal_to_Metastasis", "Normal_to_Primary", "Primary_to_Metastasis"))
+p=ggpaired(ratio_of_hyper_to_hypo_DMRs, x = "comparison_type", y = "value", id = "Trio_Number", line.color = "gray", line.size = 0.4, label = "Trio_Number", repel = TRUE, palette = c(col[2], col[1], col[3]), color="comparison_type")+
+  stat_compare_means(paired = TRUE, method = "wilcox.test", comparisons = my_comparisons)
+p + scale_y_continuous(name = "Ratio of HyperDMRs to HypoDMRs") + theme(plot.title = element_text(hjust = 0.5), legend.position="non") + theme(axis.title.y = element_text(size=10), axis.text.y = element_text(size=10), axis.text.x = element_text(size=10, angle=90), axis.ticks.x = element_blank(), axis.title.x = element_text(size=0))
+dev.off()
+
+```
+
+
+
+
+
+
+# Define autosomal DMV regions #
+```{bash Step 1: Create 1kb regions file, eval=FALSE}
+module load bedtools/2.27.1
+bedtools makewindows -g /bar/genomes/hg19/bwa/hg19_lite.size -w 1000 > "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows.bed"
+bedtools subtract -a "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows.bed" -b "/bar/jflynn/data/hg19/hg19_blacklisted_regions.bed" -A > "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows_excluding_blacklist.bed"
+grep -v chrX "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows_excluding_blacklist.bed" | grep -v chrY > "/bar/jflynn/data/hg19/genomic_bins/hg19_autosomal_1kb_windows_excluding_blacklist.bed"
+
+# Output files: "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows.bed", "/bar/jflynn/data/hg19/genomic_bins/hg19_1kb_windows_excluding_blacklist.bed", "/bar/jflynn/data/hg19/genomic_bins/hg19_autosomal_1kb_windows_excluding_blacklist.bed"
+```
+
+```{bash Step 2: Calculate average methylation per 1kb bin, eval=FALSE}
+# /tavern/jflynn/scripts/determine_average_methylation_over_1kb_bins_03192022.sh
+
+bins="/bar/jflynn/data/hg19/genomic_bins/hg19_autosomal_1kb_windows_excluding_blacklist.bed"
+all_bins="/tavern/jflynn/Projects/metastasis/trios/calculate_average_methylation_over_each_1kb_region/white_cpg_bins_1kb.bed" #debug
+methylCRF_files="/bar/jflynn/metastasis/FFPE_trios/MeDIP_and_MRE/methylCRF/methylCRF_on_files_I_aligned/complete_alignments_no_sex_chromosomes/*.bed"
+
+for file in $methylCRF_files
+do
+	sample_name=$(echo $file | awk -F'/' '{print $NF}' | awk -F'_' '{print $1}')
+	output_file="/tavern/jflynn/Projects/metastasis/trios/calculate_average_methylation_over_each_1kb_region/11102021/"$sample_name"_average_CpG_methylation_values_per_1kb_bins_sorted.bed"
+	bedtools intersect -a $bins -b $file -wa -wb | awk '{print $1"_"$2"_"$3, $8}' | awk -f /tavern/jflynn/scripts/avg.awk | awk -F'_' '{OFS="\t"; print $1, $2, $3}' | sort -k 1,1 -k2,2n> $output_file
+	sed -i '/Name/d' $output_file #Remove the name line
+	second_output_file="/tavern/jflynn/Projects/metastasis/trios/calculate_average_methylation_over_each_1kb_region/11102021/"$sample_name"_average_CpG_methylation_values_per_1kb_bins_sorted_all_bins_new.bed"
+	bedtools intersect -a $all_bins -b $output_file -loj | awk -F'\t' '{OFS="\t"; print $1, $2, $3, $7, $8, $9}' | awk -F'\t' '{OFS="\t"; if ($6==".") {print $1, $2, $3, $4, 0, NA} else {print $0} | sort -k 1,1 -k2,2n' > $second_output_file #Add back in all 1kb regions that do not have any data - just have an NA value for them (these are still hg19 autosomal 1kb windows that exclude blacklisted regions) #I think I need to add in all regions here, not just non-blacklisted ones
+done
+
+# Output files: "/tavern/jflynn/Projects/metastasis/trios/calculate_average_methylation_over_each_1kb_region/11102021/"
+```
+
+```{r Step 3: Calculate average methylation per 5kb bin, sliding 1kb at a time}
+#Adapted from: /tavern/jflynn/Projects/metastasis/trios/determine_DMVs
+
+average_methylation_per_1kb_bin_files=list.files(path = "/tavern/jflynn/Projects/metastasis/trios/calculate_average_methylation_over_each_1kb_region/11102021", pattern = "sorted_all_bins_new.bed", full.names = TRUE)
+for (file in average_methylation_per_1kb_bin_files)
+{
+  print(sample)
+  sample=strsplit(basename(file), "_")[[1]][1]
+  data=read.table(file, header=FALSE, sep="\t")
+  window_numbers_per_chr=count(data$V1)
+  
+  for (chromosome in autosomal_chromosomes)
+  {
+    print(chromosome) #debug
+    current_chromosome_windows = window_numbers_per_chr$freq[window_numbers_per_chr$x==chromosome]
+    bins=matrix(nrow = current_chromosome_windows-4, ncol = 4)
+    bins[,1]=chromosome
+    if (chromosome == "chr1")
+    {
+      starT=1
+      stoP=current_chromosome_windows
+    } else {
+      starT=stoP+1
+      stoP=stoP+current_chromosome_windows
+    }
+    counter=1
+    for (i in seq(from=starT,to=(stoP-4), by=1))
+    {
+      windows=seq(from=i, to=i+4, by=1)
+      #av=mean(data$V6[windows], na.rm=TRUE) #debug
+      av=mean(data$V6[windows])
+      bins[counter,2]=as.character(data$V2[i])
+      bins[counter,3]=as.character(data$V3[i+4])
+      bins[counter,4]=av
+      counter=counter+1
+    }
+    sample_matrix=paste(sample, chromosome, "bins", sep="_")
+    assign(sample_matrix, bins)
+  }
+  combined_chromosomes_sample_matrix=rbind(eval(parse(text=paste(sample, "chr1_bins", sep="_"))), eval(parse(text=paste(sample, "chr10_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr11_bins", sep="_"))), eval(parse(text=paste(sample, "chr12_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr13_bins", sep="_"))), eval(parse(text=paste(sample, "chr14_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr15_bins", sep="_"))), eval(parse(text=paste(sample, "chr16_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr17_bins", sep="_"))), eval(parse(text=paste(sample, "chr18_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr19_bins", sep="_"))), eval(parse(text=paste(sample, "chr2_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr20_bins", sep="_"))), eval(parse(text=paste(sample, "chr21_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr22_bins", sep="_"))), eval(parse(text=paste(sample, "chr3_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr4_bins", sep="_"))), eval(parse(text=paste(sample, "chr5_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr6_bins", sep="_"))), eval(parse(text=paste(sample, "chr7_bins", sep="_"))), 
+                                           eval(parse(text=paste(sample, "chr8_bins", sep="_"))), eval(parse(text=paste(sample, "chr9_bins", sep="_"))))
+  output_file=paste("/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/output/11112021/", sample, "_average_methylation_5KB_regions_1KB_blocks_all_bins_v2.bed", sep="")
+  write.table(combined_chromosomes_sample_matrix, file = output_file, append = FALSE, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+}
+
+# Output files: "/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/output/11112021/"
+```
+
+```{bash Determine regions with 15% or less methylation for each sample and those shared by all normal samples, eval=FALSE}
+# Adapted from: /tavern/jflynn/Projects/metastasis/trios/determine_DMVs/determine_which_regions_have_less_than_15_percent_methylation.sh
+
+module load bedtools/2.27.1
+average_methylation_per_5kb_files="/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/output/11112021/*_all_bins_v2.bed"
+individual_sample_dmvs="/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_15_percent_or_less_methylation/04202021/"
+
+for file in ${average_methylation_per_5kb_files[*]}
+do
+	sample=$(echo $file | awk -F'/' '{print $NF}' | awk -F'_' '{print $1}')
+	output_file_temp=$individual_sample_dmvs"/"$sample"_temp.bed"
+	awk -F'\t' '{if ($4 < .15) print $0}' $file | sort -k 1,1 -k2,2n > $output_file_temp
+	individual_sample_dmv_file=$individual_sample_dmvs"/"$sample"_DMVs.bed"
+	bedtools merge -i $output_file_temp > $individual_sample_dmv_file
+	rm $output_file_temp
+done
+
+multiIntersectBed -i $individual_sample_dmvs"/N0_DMVs.bed" $individual_sample_dmvs"/N1_DMVs.bed" $individual_sample_dmvs"/N2_DMVs.bed" $individual_sample_dmvs"/N3_DMVs.bed" $individual_sample_dmvs"/N4_DMVs.bed" $individual_sample_dmvs"/N5_DMVs.bed" $individual_sample_dmvs"/N6_DMVs.bed" $individual_sample_dmvs"/N7_DMVs.bed" $individual_sample_dmvs"/N8_DMVs.bed" $individual_sample_dmvs"/N9_DMVs.bed" $individual_sample_dmvs"/N10_DMVs.bed" $individual_sample_dmvs"/N11_DMVs.bed" | awk -F'\t' '{OFS="\t"; if ($4 ==12) {print $0}}' | awk -F'\t' '{OFS="\t"; print $1, $2, $3}' > "/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_shared_by_all_normals/04192022/autosomal_DMVs_shared_by_all_normals.bed"
+
+# Output files: "/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_15_percent_or_less_methylation/04202021/" and "/tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_shared_by_all_normals/04202022/autosomal_DMVs_shared_by_all_normals_sorted.bed"
+```
+
+
+
+
+
+
+### Determine the average autosomal DMV methylation across samples [FILL THIS IN]
+
+
+### Determine the change in average autosomal DMV methylation across samples (primary to metastasis) [FILL THIS IN]
+
+### Determine the average change in DMV methylation from primary to metastasis
+[FILL THIS IN]
+
+### Change in DMV methylation vs. change in global methylation
+[FILL THIS IN]
+
+### Change in DMV methylation vs. change in purity
+[FILL THIS IN]
+
+
+
+
+
+
+
+
+
+# ChIP-Seq
+
+EZH2 ChIP-seq was performed in H1299 in two replicates. Input samples were also sequenced from both replicates, and serve as corresponding controls.
+
+```{bash ChIP-seq raw fastqs, eval=FALSE}
+# Original fastq files
+## ChIP Sample Rep 1
+/taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R1_001.fastq.gz
+/taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R2_001.fastq.gz
+## ChIP Sample Rep 2
+/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R1_001.fastq.gz
+/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R2_001.fastq.gz
+## ChIP Input Rep 1
+/taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1_001.fastq.gz
+/taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R2_001.fastq.gz
+## ChIP Input Rep 2
+/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1_001.fastq.gz
+/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R2_001.fastq.gz
+```
+
+## ChIP-Seq data processing
+
+I first performed a quality check on all raw fastq files and then removed adapter sequences and low quality read ends from the raw fastq files.
+
+```{bash ChIP-seq Trim adapters and read ends, eval=FALSE}
+# Load required module(s):
+module load FastQC/0.11.5
+module load cutadapt/1.10
+
+# Run FastQC on all raw files
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R1_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R2_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R1_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R2_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R2_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1_001.fastq.gz"
+fastqc -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output -t 4 "/taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R2_001.fastq.gz"
+
+## Output
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output [4 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output [4 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output [4 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/A_fastqc_raw_fastq_files/FastQC_output/FastQC_output [4 files]
+
+# Run Cutadapt on all raw files
+cutadapt -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -f fastq -q 20,20 --minimum-length 20 -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R1_001.fastq_trim.gz -p /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R2_001.fastq_trim.gz /taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R1_001.fastq.gz /taproom/data/ChIP-JF/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R2_001.fastq.gz > /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-JF_GTACIndex1_TGAGGTTATC_AGATCTCG_S5_R1and2_001.fastq.trimlog
+
+cutadapt -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -f fastq -q 20,20 --minimum-length 20 -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R1_001.fastq_trim.gz -p /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R2_001.fastq.gz /taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R1_001.fastq.gz /taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R2_001.fastq.gz > /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-EZH2-Rep-2_GTAC-Index3_ATGACAGATC_S12_R1and2_001.fastq.trimlog
+
+cutadapt -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -f fastq -q 20,20 --minimum-length 20 -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1_001.fastq_trim.gz -p /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R2_001.fastq_trim.gz /taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1_001.fastq.gz /taproom/data/jflynn/EZH2_ChIP_Seq_H1299/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R2_001.fastq.gz > /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1and2_001.fastq.trimlog
+
+cutadapt -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT -f fastq -q 20,20 --minimum-length 20 -o /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1_001.fastq_trim.gz -p /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R2_001.fastq_trim.gz /taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1_001.fastq.gz /taproom/data/dli/ChIP-JF-rep2/WangT_ChIP/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R2_001.fastq.gz > /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1and2_001.fastq.trimlog
+
+## Output
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output [3 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_sample_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output [3 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output [3 files]
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/B_trim_adapters_and_remove_low_quality_reads/cutadapt_output [3 files]
+```
+
+Using adapter- and low quality end- trimmed reads, I next ran the ChIP-seq data through ENCODE's ChIP-seq pipeline (v2). Instructions for installing the pipeline and conda environment can be found [here] (https://github.com/ENCODE-DCC/chip-seq-pipeline2/blob/master/README.md). 
+
+```{bash Run ENCODE's chip-seq-pipeline2 on H1299 samples, eval=FALSE}
+# Install pipeline
+cd /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline
+git clone https://github.com/ENCODE-DCC/chip-seq-pipeline2
+# Install conda environment:
+bash ./scripts/uninstall_conda_env.sh  # uninstall it for clean-install
+bash scripts/install_conda_env.sh mamba
+# Activate pipeline's conda environment
+conda activate encode-chip-seq-pipeline
+# Set up Caper following instructions: https://github.com/ENCODE-DCC/caper
+# Run pipeline
+cd /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299
+ml python3/3.7
+caper run ../chip-seq-pipeline2/chip.wdl -i H1299_data.json
+# Organize output
+croo /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299/chip/88fbef41-0855-4558-b8e2-35f9a2461731/metadata.json --out-def-json /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/chip-seq-pipeline2/chip.croo.v5.json --out-dir /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299/chip/88fbef41-0855-4558-b8e2-35f9a2461731/results 
+# Create a spreadsheet of QC metrics
+pip install qc2tsv
+qc2tsv /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299/chip/88fbef41-0855-4558-b8e2-35f9a2461731/results/qc/qc.json >  /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299/chip/88fbef41-0855-4558-b8e2-35f9a2461731/results/qc/spreadsheet.tsv
+
+## Output
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/H1299/chip/88fbef41-0855-4558-b8e2-35f9a2461731/results
+```
+
+Compare ChIP-seq profiles across samples
+
+```{r Run DiffBind, eval=TRUE}
+
+# Load in the ENCODE EZH2 ChIP-seq metadata
+encode_samples_metadata=read.table("/scratch/jflynn/ENCODE/EZH2_ChIP/metadata.tsv", header=T, sep="\t")
+encode_samples_metadata=encode_samples_metadata[encode_samples_metadata$File.assembly=="hg19",]
+encode_controls_metadata=read.table("/scratch/jflynn/ENCODE/ChIP_Control_BAMs/metadata.tsv", header=T, sep="\t")
+encode_controls_metadata=encode_controls_metdata[encode_controls_metdata$File.assembly=="hg19",] #Keep only hg19
+
+# Filter controls for only ones used with the EZH2 experiments (obtained through manual curration of each project page)
+matching_controls=data.frame(unique(encode_samples_metadata$Biosample.term.name), control_experiment_accessions=c("ENCSR000AKJ", "ENCSR000ALS", "ENCSR000AMN", "ENCSR773IYZ", "ENCSR000AOB", "ENCSR000ANN", "ENCSR000AOP", "ENCSR055XHN", "ENCSR000ASA", "ENCSR000AMI", "ENCSR899XXQ", "ENCSR000APT", "ENCSR569IIN", "ENCSR011GWK", "ENCSR000AKY", "ENCSR000ALG", "ENCSR000AMZ", "ENCSR000AUW", "ENCSR000ANT", "ENCSR196CXJ", "ENCSR264HOB", "ENCSR198WIH"))
+encode_controls_metadata=encode_controls_metadata[encode_controls_metadata$Experiment.accession%in%matching_controls$control_experiment_accessions,]
+
+our_data=data.frame(SampleID=mapply(function(x,y) paste0(x,"_",y), encode_samples_metadata$Biosample.term.name[encode_samples_metadata$Output.type=="alignments"], encode_samples_metadata$Biological.replicate.s.[encode_samples_metadata$Output.type=="alignments"]),
+                    Tissue=encode_samples_metadata$Biosample.term.name[encode_samples_metadata$Output.type=="alignments"],
+                    Factor=encode_samples_metadata$Experiment.target[encode_samples_metadata$Output.type=="alignments"],
+                    Condition=rep(NA, length(encode_samples_metadata$Experiment.target[encode_samples_metadata$Output.type=="alignments"])),
+                    Treatment=rep("none", length(encode_samples_metadata$Experiment.target[encode_samples_metadata$Output.type=="alignments"])),
+                    Replicate=c(encode_samples_metadata$Biological.replicate.s.[encode_samples_metadata$Output.type=="alignments"]),
+                    bamReads=c(unlist(lapply(encode_samples_metadata$File.accession[encode_samples_metadata$Output.type=="alignments"], function(x) paste0("/scratch/jflynn/ENCODE/EZH2_ChIP/",x,".bam")))),
+                    
+                    
+                    
+                    ControlID=c("H1299c", "H1299c", "NHLFc", "NHLFc"),
+                    bamControl=c("/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_1/F_remove_multimapped_reads/filtered_alignment_output/WangT_ChIP_ChIP-input_GTAC_Index45_GATAGTTATC_S4_R1and2_001.sorted.removed_duplicates.removed_multimappers.bam",
+                                 "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/ChIP_input_replicate_2/F_remove_multimapped_reads/filtered_alignment_output/WangT_ChIP-Input-Rep-2_GTAC-Index2_GCTTAGAATC_S10_R1and2_001.sorted.removed_duplicates.removed_multimappers.bam",
+                                 "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/picard_output/wgEncodeBroadHistoneNhlfControlStdAlnRep1.sorted.removed_duplicates.bam",
+                                 "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/picard_output/wgEncodeBroadHistoneNhlfControlStdAlnRep2.sorted.removed_duplicates.bam"),
+                    Peaks=c("/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/replicate_1_call_peaks_multimappers_removed_first/MACS2_output/EZH2_ChIP_Seq_H1299_Rep_1_multimappers_filtered_first_peaks.narrowPeak",
+                            "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/replicate_2_call_peaks_multimappers_removed_first/MACS2_output/EZH2_ChIP_Seq_H1299_Rep_2_multimappers_filtered_first_peaks.narrowPeak",
+                            "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/MACS2_output/EZH2_ChIP_Seq_NHLF_Rep_1_peaks.narrowPeak",
+                            "/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/MACS2_output/EZH2_ChIP_Seq_NHLF_Rep_2_peaks.narrowPeak"),
+                    PeakCaller=c("bed", "bed", "bed", "bed"))
+```
+
+Compare EZH2 chip enrichment within DMVs across H1299, NHLF, and NHA samples
+
+```{bash EZH2 signal over DMVs - compute matrix, eval=FALSE}
+module load python2
+
+# Run computeMatrix (https://github.com/deeptools/deepTools/wiki/Visualizations)
+# NOTE: I want to use the scale-regions mode since I am looking over the DMV for all DMVs
+# usage: An example usage is:
+#  computeMatrix scale-regions -S <biwig file> -R <bed file> -b 1000
+
+computeMatrix scale-regions \
+ --regionsFileName /tavern/jflynn/Projects/metastasis/trios/determine_DMVs/DMVs_shared_by_all_normals/autosomal_DMVs_shared_by_all_normals.bed \
+ --scoreFileName /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/MACS2_output/EZH2_ChIP_Seq_NHLF_Rep_1_FE.bw /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/NHLF_EZH2/call_peaks/MACS2_output/EZH2_ChIP_Seq_NHLF_Rep_2_FE.bw
+ 
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/test_NHLF/chip/73e35255-4da4-4fdb-95a8-5b07a41065ea/results/signal/rep1/ENCFF000CRA.srt.nodup_x_ctl.pooled.fc.signal.bigwig /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/test_NHLF/chip/73e35255-4da4-4fdb-95a8-5b07a41065ea/results/signal/rep2/ENCFF000CRB.srt.nodup_x_ctl.pooled.fc.signal.bigwig /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/encode_chip_seq_pipeline/test_NHLF/chip/73e35255-4da4-4fdb-95a8-5b07a41065ea/results/signal/pooled-rep/rep.pooled_x_ctl.pooled.fc.signal.bigwig
+
+/tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/replicate_3_call_peaks/MACS2_output/EZH2_ChIP_Seq_H1299_Rep_3_FE.bw /tavern/jflynn/Projects/metastasis/ChIP_seq_EZH2_H1299/replicate_4_call_peaks/MACS2_output/EZH2_ChIP_Seq_H1299_Rep_4_FE.bw \
+ --outFileName ./results/output_matrix_for_plotting_extended \
+ --outFileNameMatrix ./results/output_matrix_values_extended \
+ --outFileSortedRegions ./results/output_sorted_regions_saved_extended \
+ --beforeRegionStartLength 2000 \
+ --afterRegionStartLength 2000 \
+ --blackListFileName /bar/jflynn/data/hg19/hg19_blacklisted_regions.bed \
+ --numberOfProcessors 20 
+
+echo "Finished"
+
+# Unload the appropriate modules
+module unload python2 
+```
